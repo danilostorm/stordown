@@ -23,7 +23,9 @@ use tokio::{
     net::TcpListener,
     sync::{Mutex, Semaphore},
 };
-use transfer_store::{NewTransferRecord, TransferRecord, TransferStore};
+use transfer_store::{
+    DownloadRule, NewDownloadRule, NewTransferRecord, TransferRecord, TransferStore,
+};
 use uuid::Uuid;
 
 const GOOGLE_KEYRING_SERVICE: &str = "StorDown Google Drive";
@@ -821,7 +823,35 @@ async fn handle_browser_capture(
     }
 
     let file_name = browser_capture_filename(&url, request.filename.as_deref());
-    let output = unique_destination(&download_dir, &file_name);
+
+    let destination_dir = match store.match_download_rule(&file_name).await {
+        Ok(Some(rule)) => {
+            let path = PathBuf::from(&rule.destination);
+            if let Err(error) = tokio::fs::create_dir_all(&path).await {
+                return BrowserCaptureResponse {
+                    ok: false,
+                    transfer_id: None,
+                    status: None,
+                    error: Some(format!(
+                        "Falha ao criar pasta da categoria {}: {error}",
+                        rule.name
+                    )),
+                };
+            }
+            path
+        }
+        Ok(None) => download_dir.clone(),
+        Err(error) => {
+            return BrowserCaptureResponse {
+                ok: false,
+                transfer_id: None,
+                status: None,
+                error: Some(format!("Falha ao aplicar regra de download: {error}")),
+            };
+        }
+    };
+
+    let output = unique_destination(&destination_dir, &file_name);
     let transfer_id = Uuid::new_v4().to_string();
 
     match enqueue_download_job(
@@ -932,6 +962,68 @@ fn unique_destination(directory: &Path, file_name: &str) -> PathBuf {
     }
 
     directory.join(format!("{stem}-{}.bin", Uuid::new_v4()))
+}
+
+#[tauri::command]
+async fn list_download_rules(
+    store: State<'_, TransferStore>,
+) -> Result<Vec<DownloadRule>, String> {
+    store.list_download_rules().await
+}
+
+#[tauri::command]
+async fn save_download_rule(
+    id: Option<i64>,
+    name: String,
+    extensions: Vec<String>,
+    destination: String,
+    enabled: bool,
+    priority: i64,
+    store: State<'_, TransferStore>,
+) -> Result<DownloadRule, String> {
+    if name.trim().is_empty() {
+        return Err("Informe um nome para a categoria".to_string());
+    }
+
+    if destination.trim().is_empty() {
+        return Err("Informe uma pasta de destino".to_string());
+    }
+
+    if extensions.is_empty() {
+        return Err("Informe pelo menos uma extensão".to_string());
+    }
+
+    tokio::fs::create_dir_all(destination.trim())
+        .await
+        .map_err(|error| format!("Falha ao preparar pasta de destino: {error}"))?;
+
+    store
+        .upsert_download_rule(
+            id,
+            NewDownloadRule {
+                name,
+                extensions,
+                destination,
+                enabled,
+                priority,
+            },
+        )
+        .await
+}
+
+#[tauri::command]
+async fn delete_download_rule(
+    id: i64,
+    store: State<'_, TransferStore>,
+) -> Result<(), String> {
+    store.delete_download_rule(id).await
+}
+
+#[tauri::command]
+fn pick_download_rule_folder() -> Result<Option<String>, String> {
+    Ok(rfd::FileDialog::new()
+        .pick_folder()
+        .map(|path| path.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -1079,6 +1171,10 @@ fn main() {
             list_transfers,
             delete_transfer_history,
             clear_finished_history,
+            list_download_rules,
+            save_download_rule,
+            delete_download_rule,
+            pick_download_rule_folder,
             pause_transfer,
             resume_transfer,
             cancel_transfer,
