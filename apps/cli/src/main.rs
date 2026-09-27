@@ -29,6 +29,9 @@ enum Command {
 
         #[arg(long = "bind", required = true)]
         bind: Vec<IpAddr>,
+
+        #[arg(long)]
+        sha256: Option<String>,
     },
 
     UploadDrive {
@@ -56,6 +59,7 @@ async fn main() -> Result<()> {
             output,
             connections,
             bind,
+            sha256,
         } => {
             if bind.is_empty() {
                 bail!("provide at least one --bind IP");
@@ -70,6 +74,7 @@ async fn main() -> Result<()> {
                 connections,
                 links,
                 headers: HashMap::new(),
+                expected_sha256: sha256,
             })
             .await?;
 
@@ -77,6 +82,10 @@ async fn main() -> Result<()> {
             println!("Bytes: {}", result.bytes_written);
             println!("Segments: {}", result.segments);
             println!("Links used: {}", result.links_used.join(", "));
+            if let Some(hash) = result.sha256 {
+                println!("SHA-256: {hash}");
+                println!("Integrity: verified");
+            }
         }
 
         Command::UploadDrive {
