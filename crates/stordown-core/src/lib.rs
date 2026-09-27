@@ -1,9 +1,11 @@
+pub mod adaptive;
 pub mod cloud;
 pub mod control;
 pub mod downloader;
 pub mod model;
 pub mod network;
 
+pub use adaptive::{AdaptiveLinkPool, LinkHealthSnapshot, LinkLease};
 pub use cloud::{
     authorize_google_drive_desktop, refresh_google_access_token, upload_google_drive_batch,
     upload_google_drive_batch_with_control, upload_google_drive_batch_with_progress,
