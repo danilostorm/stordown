@@ -1,0 +1,9 @@
+{
+  "name": "cloud.hoststorm.stordown",
+  "description": "StorDown browser capture bridge",
+  "path": "C:\\Program Files\\StorDown\\stordown-native-host.exe",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://YOUR_EXTENSION_ID/"
+  ]
+}
