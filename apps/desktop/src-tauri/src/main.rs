@@ -615,6 +615,37 @@ async fn cancel_transfer(
 }
 
 #[tauri::command]
+fn pick_download_destination(suggested_name: Option<String>) -> Result<Option<String>, String> {
+    let mut dialog = rfd::FileDialog::new();
+
+    if let Some(name) = suggested_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let safe_name = Path::new(name)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("download.bin");
+        dialog = dialog.set_file_name(safe_name);
+    }
+
+    Ok(dialog
+        .save_file()
+        .map(|path| path.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn pick_upload_files() -> Result<Vec<String>, String> {
+    Ok(rfd::FileDialog::new()
+        .pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect())
+}
+
+#[tauri::command]
 async fn test_routes(bind_ips: Vec<String>) -> Result<Vec<LinkProbeStatus>, String> {
     Ok(probe_links(parse_links(bind_ips)?).await)
 }
@@ -714,6 +745,8 @@ fn main() {
             pause_transfer,
             resume_transfer,
             cancel_transfer,
+            pick_download_destination,
+            pick_upload_files,
             test_routes,
             list_network_interfaces,
             connect_google_drive,
