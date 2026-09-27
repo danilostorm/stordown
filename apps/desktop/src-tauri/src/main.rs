@@ -342,6 +342,13 @@ async fn current_google_access_token(state: &GoogleAuthState) -> Result<String, 
     Ok(session.access_token.clone())
 }
 
+fn mbps_to_bytes_per_second(mbps: Option<u64>) -> Option<u64> {
+    mbps
+        .filter(|value| *value > 0)
+        .and_then(|value| value.checked_mul(1_000_000))
+        .and_then(|value| value.checked_div(8))
+}
+
 fn now_epoch_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -356,8 +363,12 @@ fn spawn_download_execution(
     connections: usize,
     bind_ips: Vec<String>,
     headers: HashMap<String, String>,
+    max_bytes_per_second: Option<u64>,
+    expected_sha256: Option<String>,
     transfer_id: String,
     scheduled_at: Option<i64>,
+    speed_limit_mbps: Option<u64>,
+    expected_sha256: Option<String>,
     app: AppHandle,
     queue_state: QueueState,
     control_state: TransferControlState,
@@ -411,6 +422,8 @@ fn spawn_download_execution(
                 connections,
                 links,
                 headers,
+                max_bytes_per_second,
+                expected_sha256,
             },
             transfer_id.clone(),
             Some(progress_emitter(app.clone(), store.clone())),
@@ -448,6 +461,8 @@ async fn enqueue_download_job(
     connections: usize,
     bind_ips: Vec<String>,
     headers: HashMap<String, String>,
+    max_bytes_per_second: Option<u64>,
+    expected_sha256: Option<String>,
     transfer_id: String,
     scheduled_at: Option<i64>,
     app: AppHandle,
@@ -470,6 +485,8 @@ async fn enqueue_download_job(
             connections,
             bind_ips: bind_ips.clone(),
             scheduled_at: normalized_schedule,
+            max_bytes_per_second,
+            expected_sha256: expected_sha256.clone(),
         })
         .await?;
 
@@ -481,6 +498,8 @@ async fn enqueue_download_job(
         connections,
         bind_ips,
         headers,
+        max_bytes_per_second,
+        expected_sha256,
         transfer_id,
         normalized_schedule,
         app,
@@ -511,6 +530,8 @@ async fn enqueue_download(
         connections,
         bind_ips,
         HashMap::new(),
+        mbps_to_bytes_per_second(speed_limit_mbps),
+        expected_sha256,
         transfer_id,
         scheduled_at,
         app,
@@ -527,6 +548,7 @@ async fn enqueue_drive_upload(
     parent_id: Option<String>,
     bind_ips: Vec<String>,
     chunk_mib: u64,
+    speed_limit_mbps: Option<u64>,
     transfer_id: String,
     app: AppHandle,
     auth_state: State<'_, GoogleAuthState>,
@@ -566,6 +588,8 @@ async fn enqueue_drive_upload(
             connections: files.len().max(1),
             bind_ips,
             scheduled_at: None,
+            max_bytes_per_second: mbps_to_bytes_per_second(speed_limit_mbps),
+            expected_sha256: None,
         })
         .await?;
 
@@ -605,6 +629,7 @@ async fn enqueue_drive_upload(
                 parent_id: parent_id.filter(|value| !value.trim().is_empty()),
                 chunk_size,
                 links,
+                max_bytes_per_second: mbps_to_bytes_per_second(speed_limit_mbps),
             },
             transfer_id.clone(),
             Some(progress_emitter(task_app.clone(), task_store.clone())),
@@ -925,6 +950,8 @@ async fn handle_browser_capture(
         8,
         bind_ips,
         auth_headers,
+        None,
+        None,
         transfer_id.clone(),
         None,
         app.clone(),
@@ -1264,6 +1291,8 @@ fn main() {
                             record.connections,
                             record.bind_ips,
                             HashMap::new(),
+                            record.max_bytes_per_second,
+                            record.expected_sha256,
                             record.id,
                             record.scheduled_at,
                             restore_app.clone(),
