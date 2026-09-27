@@ -129,7 +129,6 @@ pub async fn upload_google_drive_file_with_control(
         transfer_id,
         progress,
         control,
-        throttle,
     )
     .await
 }
@@ -209,6 +208,7 @@ async fn upload_google_drive_file_with_pool(
         &transfer_id,
         progress,
         control,
+        throttle,
     )
     .await
 }
