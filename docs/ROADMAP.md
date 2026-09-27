@@ -28,8 +28,8 @@
 - [x] Persistent HTTP download scheduler
 - [ ] Speed limits
 - [x] Pause / resume / cancel controls for active transfers
-- [ ] Smart weighted balancing
-- [ ] Failover when one link disappears
+- [x] Smart adaptive balancing for segmented HTTP downloads
+- [x] Automatic HTTP segment failover when one link disappears
 - [ ] File integrity verification
 - [x] Windows file picker integration
 

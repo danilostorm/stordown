@@ -606,6 +606,7 @@ export default function App() {
         <div className="networkCard">
           <span>Multi-Link</span>
           <strong>{links.length} links configurados</strong>
+          <div className="smartWanBadge">Smart balance + failover automático</div>
 
           {links.map((ip, index) => {
             const nic = nicByIp.get(ip);
@@ -661,6 +662,14 @@ export default function App() {
 
         {view === "download" && (
           <form className="downloadCard" onSubmit={submitDownload}>
+            <div className="notice">
+              <strong>Smart Multi-WAN ativo</strong>
+              <span>
+                O StorDown mede o desempenho real das interfaces durante o arquivo, entrega mais
+                blocos ao link mais rápido e move novas tentativas para outra WAN quando uma rota falha.
+              </span>
+            </div>
+
             <label>
               URL
               <input
@@ -1275,6 +1284,7 @@ function TransferTelemetry({
                 <div className="itemMeta">
                   <span>
                     {item.direction === "upload" ? "Upload" : "Download"} • {item.link_name}
+                    {item.phase.startsWith("failover") ? " • Failover" : ""}
                   </span>
                   <span>
                     {formatBytes(item.bytes_transferred)}

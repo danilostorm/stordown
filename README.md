@@ -29,6 +29,7 @@ The repository currently contains:
 - Chrome/Edge native-messaging bridge with context-menu and beta automatic capture;
 - automatic download categories and extension-based destination rules;
 - persistent HTTP download scheduler with restart recovery;
+- adaptive Multi-WAN chunk scheduling with automatic link failover;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -261,3 +262,24 @@ schedule -> SQLite -> close StorDown
 ```
 
 The Agendador screen lists pending scheduled downloads and allows cancellation before they start. Browser-captured downloads still start immediately unless a later browser scheduling workflow is added.
+
+
+## Smart Multi-WAN balancing and failover
+
+Segmented HTTP downloads no longer assign every Range worker to a fixed WAN for the entire file.
+
+StorDown now breaks a large file into multiple scheduling waves while keeping the configured connection limit. Each completed range contributes a throughput sample for the interface that carried it. The adaptive scheduler uses an exponentially weighted throughput estimate, configured link weight, active-worker count and recent failures when deciding which WAN receives the next block.
+
+```text
+first wave
+  WAN1 -> sample ~48 MB/s
+  WAN2 -> sample ~27 MB/s
+
+next waves
+  WAN1 -> receives more pending blocks
+  WAN2 -> remains active, but receives fewer blocks
+```
+
+If a segment request or stream fails on one interface, that link enters a short exponential cooldown and the unfinished Range is retried from the bytes already written using another healthy interface. A permanently bad path is probed less often while the remaining WAN continues carrying work.
+
+The adaptive scheduler supports more than two enabled local interfaces; the practical number of usable Internet paths still depends on the router and policy-based routing configuration.

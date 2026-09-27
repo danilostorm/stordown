@@ -1,4 +1,5 @@
 use crate::{
+    adaptive::AdaptiveLinkPool,
     control::TransferControl,
     model::{
         DownloadRequest, DownloadResult, LinkConfig, ProbeResult, ProgressCallback,
@@ -284,55 +285,62 @@ async fn download_segmented(
 ) -> Result<DownloadResult> {
     ensure_parent(&request.output).await?;
 
-    let segments = request.connections.min(size.max(1) as usize);
+    let max_workers = size.min(usize::MAX as u64).max(1) as usize;
+    let workers = request.connections.min(max_workers).max(1);
+    let segments = adaptive_segment_count(size, workers);
     let part_dir = part_dir_for(&request.output);
 
     prepare_part_dir(&part_dir, &request.url, size, segments).await?;
 
-    let weighted_links = expand_weighted_links(&links);
+    let pool = AdaptiveLinkPool::new(links.clone());
     let aggregate = Arc::new(AtomicU64::new(0));
     let item = output_name(&request.output);
-    let mut jobs = JoinSet::new();
+    let mut jobs: JoinSet<Result<(usize, u64, Vec<String>)>> = JoinSet::new();
+    let mut next_index = 0usize;
 
-    for index in 0..segments {
-        let (start, end) = segment_bounds(size, segments, index);
-        let link = weighted_links[index % weighted_links.len()].clone();
-        let url = request.url.clone();
-        let headers = request.headers.clone();
-        let part = part_dir.join(format!("{index:05}.part"));
-        let progress = progress.clone();
-        let transfer_id = transfer_id.clone();
-        let item = item.clone();
-        let aggregate = aggregate.clone();
-        let control = control.clone();
-
-        jobs.spawn(async move {
-            download_range_resumable(
-                &url,
-                &headers,
-                &part,
-                start,
-                end,
-                &link,
-                size,
-                &transfer_id,
-                &item,
-                aggregate,
-                progress,
-                control,
-            )
-            .await
-            .map(|bytes| (index, bytes, link.name))
-        });
+    while next_index < segments && jobs.len() < workers {
+        spawn_segment_job(
+            &mut jobs,
+            next_index,
+            &request,
+            &part_dir,
+            size,
+            segments,
+            &transfer_id,
+            &item,
+            aggregate.clone(),
+            progress.clone(),
+            control.clone(),
+            pool.clone(),
+        );
+        next_index += 1;
     }
 
     let mut total = 0u64;
     let mut used = BTreeSet::new();
 
     while let Some(result) = jobs.join_next().await {
-        let (_index, bytes, link_name) = result??;
+        let (_index, bytes, link_names) = result??;
         total += bytes;
-        used.insert(link_name);
+        used.extend(link_names);
+
+        if next_index < segments {
+            spawn_segment_job(
+                &mut jobs,
+                next_index,
+                &request,
+                &part_dir,
+                size,
+                segments,
+                &transfer_id,
+                &item,
+                aggregate.clone(),
+                progress.clone(),
+                control.clone(),
+                pool.clone(),
+            );
+            next_index += 1;
+        }
     }
 
     if total != size {
@@ -367,22 +375,65 @@ async fn download_segmented(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn spawn_segment_job(
+    jobs: &mut JoinSet<Result<(usize, u64, Vec<String>)>>,
+    index: usize,
+    request: &DownloadRequest,
+    part_dir: &Path,
+    size: u64,
+    segments: usize,
+    transfer_id: &str,
+    item: &str,
+    aggregate: Arc<AtomicU64>,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+    pool: AdaptiveLinkPool,
+) {
+    let (start, end) = segment_bounds(size, segments, index);
+    let url = request.url.clone();
+    let headers = request.headers.clone();
+    let part = part_dir.join(format!("{index:05}.part"));
+    let transfer_id = transfer_id.to_string();
+    let item = item.to_string();
+
+    jobs.spawn(async move {
+        download_range_resumable(
+            &url,
+            &headers,
+            &part,
+            start,
+            end,
+            size,
+            &transfer_id,
+            &item,
+            aggregate,
+            progress,
+            control,
+            pool,
+        )
+        .await
+        .map(|(bytes, links)| (index, bytes, links))
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn download_range_resumable(
     url: &str,
     headers: &HashMap<String, String>,
     part_path: &Path,
     start: u64,
     end: u64,
-    link: &LinkConfig,
     total_size: u64,
     transfer_id: &str,
     item: &str,
     aggregate: Arc<AtomicU64>,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
-) -> Result<u64> {
+    pool: AdaptiveLinkPool,
+) -> Result<(u64, Vec<String>)> {
     let expected = end - start + 1;
     let mut existing = part_len(part_path).await;
+    let mut links_used = BTreeSet::new();
 
     if existing > expected {
         let _ = fs::remove_file(part_path).await;
@@ -390,26 +441,13 @@ async fn download_range_resumable(
     }
 
     if existing > 0 {
-        let overall = aggregate.fetch_add(existing, Ordering::Relaxed) + existing;
-        emit_progress(
-            progress.as_ref(),
-            transfer_id,
-            "download",
-            item,
-            "resumed",
-            0,
-            overall,
-            Some(total_size),
-            link,
-            false,
-        );
+        aggregate.fetch_add(existing, Ordering::Relaxed);
     }
 
     if existing == expected {
-        return Ok(expected);
+        return Ok((expected, Vec::new()));
     }
 
-    let client = client_for(link.local_ip)?;
     let mut attempt = 0usize;
 
     loop {
@@ -418,7 +456,7 @@ async fn download_range_resumable(
         let current_len = part_len(part_path).await;
 
         if current_len == expected {
-            return Ok(expected);
+            return Ok((expected, links_used.into_iter().collect()));
         }
 
         if current_len > expected {
@@ -432,6 +470,49 @@ async fn download_range_resumable(
         }
 
         attempt += 1;
+        let lease = pool.acquire().await;
+        let link = lease.link.clone();
+        links_used.insert(link.name.clone());
+
+        if attempt > 1 {
+            emit_progress(
+                progress.as_ref(),
+                transfer_id,
+                "download",
+                item,
+                "failover",
+                0,
+                aggregate.load(Ordering::Relaxed),
+                Some(total_size),
+                &link,
+                false,
+            );
+        } else if existing > 0 {
+            emit_progress(
+                progress.as_ref(),
+                transfer_id,
+                "download",
+                item,
+                "resumed",
+                0,
+                aggregate.load(Ordering::Relaxed),
+                Some(total_size),
+                &link,
+                false,
+            );
+        }
+
+        let client = match client_for(link.local_ip) {
+            Ok(client) => client,
+            Err(error) => {
+                pool.failure(&lease).await;
+                if attempt >= MAX_SEGMENT_RETRIES {
+                    return Err(error);
+                }
+                continue;
+            }
+        };
+
         let resume_start = start + current_len;
         let req = request_with_headers(
             client
@@ -443,21 +524,25 @@ async fn download_range_resumable(
         let response = match req.send().await {
             Ok(response) => response,
             Err(error) => {
+                pool.failure(&lease).await;
+
                 if attempt >= MAX_SEGMENT_RETRIES {
-                    return Err(error).context("segment request failed after retries");
+                    return Err(error).context("segment request failed after multi-WAN failover");
                 }
 
-                sleep(retry_backoff(attempt)).await;
                 continue;
             }
         };
 
         if response.status() != StatusCode::PARTIAL_CONTENT {
-            if (response.status().is_server_error()
-                || response.status() == StatusCode::TOO_MANY_REQUESTS)
+            let status = response.status();
+            pool.failure(&lease).await;
+
+            if (status.is_server_error()
+                || status == StatusCode::TOO_MANY_REQUESTS
+                || status == StatusCode::REQUEST_TIMEOUT)
                 && attempt < MAX_SEGMENT_RETRIES
             {
-                sleep(retry_backoff(attempt)).await;
                 continue;
             }
 
@@ -465,11 +550,17 @@ async fn download_range_resumable(
                 "server ignored HTTP Range for {} on {} (status {})",
                 link.name,
                 link.local_ip,
-                response.status()
+                status
             );
         }
 
         if response.headers().get(CONTENT_RANGE).is_none() {
+            pool.failure(&lease).await;
+
+            if attempt < MAX_SEGMENT_RETRIES {
+                continue;
+            }
+
             bail!("server returned 206 without Content-Range");
         }
 
@@ -481,6 +572,7 @@ async fn download_range_resumable(
             .await?;
 
         let mut pending_delta = 0u64;
+        let mut attempt_bytes = 0u64;
         let mut last_emit = Instant::now();
         let mut stream_failed = false;
 
@@ -492,6 +584,7 @@ async fn download_range_resumable(
                     file.write_all(&chunk).await?;
 
                     let delta = chunk.len() as u64;
+                    attempt_bytes += delta;
                     pending_delta += delta;
                     let overall = aggregate.fetch_add(delta, Ordering::Relaxed) + delta;
 
@@ -501,11 +594,11 @@ async fn download_range_resumable(
                             transfer_id,
                             "download",
                             item,
-                            if attempt > 1 { "retrying" } else { "transferring" },
+                            if attempt > 1 { "failover-active" } else { "transferring" },
                             pending_delta,
                             overall,
                             Some(total_size),
-                            link,
+                            &link,
                             false,
                         );
                         pending_delta = 0;
@@ -527,11 +620,11 @@ async fn download_range_resumable(
                 transfer_id,
                 "download",
                 item,
-                if attempt > 1 { "retrying" } else { "transferring" },
+                if attempt > 1 { "failover-active" } else { "transferring" },
                 pending_delta,
                 aggregate.load(Ordering::Relaxed),
                 Some(total_size),
-                link,
+                &link,
                 false,
             );
         }
@@ -539,13 +632,16 @@ async fn download_range_resumable(
         let final_len = part_len(part_path).await;
 
         if final_len == expected {
-            return Ok(expected);
+            pool.success(&lease, attempt_bytes).await;
+            return Ok((expected, links_used.into_iter().collect()));
         }
+
+        pool.failure(&lease).await;
 
         if attempt >= MAX_SEGMENT_RETRIES {
             if stream_failed {
                 bail!(
-                    "segment {}-{} failed after {} retries with {} of {} bytes",
+                    "segment {}-{} failed after {} multi-WAN attempts with {} of {} bytes",
                     start,
                     end,
                     MAX_SEGMENT_RETRIES,
@@ -651,16 +747,21 @@ fn client_for(local_ip: IpAddr) -> Result<Client> {
         .context("failed to build HTTP client bound to local IP")
 }
 
-fn expand_weighted_links(links: &[LinkConfig]) -> Vec<LinkConfig> {
-    let mut result = Vec::new();
+fn adaptive_segment_count(size: u64, workers: usize) -> usize {
+    const TARGET_MIN_SEGMENT: u64 = 8 * 1024 * 1024;
+    const WAVES: usize = 16;
 
-    for link in links {
-        for _ in 0..link.weight.max(1) {
-            result.push(link.clone());
-        }
-    }
+    let max_possible = size.min(usize::MAX as u64) as usize;
+    let workers = workers.max(1).min(max_possible.max(1));
+    let desired = workers.saturating_mul(WAVES).max(workers);
+    let by_size = size
+        .saturating_add(TARGET_MIN_SEGMENT - 1)
+        .checked_div(TARGET_MIN_SEGMENT)
+        .unwrap_or(1)
+        .max(workers as u64)
+        .min(usize::MAX as u64) as usize;
 
-    result
+    desired.min(by_size).min(max_possible.max(1)).max(workers)
 }
 
 fn segment_bounds(size: u64, segments: usize, index: usize) -> (u64, u64) {
@@ -732,7 +833,7 @@ async fn assemble_parts(part_dir: &Path, output: &Path, segments: usize) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{segment_bounds, total_from_content_range, PartManifest};
+    use super::{adaptive_segment_count, segment_bounds, total_from_content_range, PartManifest};
 
     #[test]
     fn segment_bounds_cover_entire_file_without_overlap() {
@@ -741,6 +842,13 @@ mod tests {
         assert_eq!(segment_bounds(size, segments, 0), (0, 3));
         assert_eq!(segment_bounds(size, segments, 1), (4, 6));
         assert_eq!(segment_bounds(size, segments, 2), (7, 9));
+    }
+
+    #[test]
+    fn adaptive_segmentation_creates_multiple_waves() {
+        let gib = 1024u64 * 1024 * 1024;
+        assert_eq!(adaptive_segment_count(gib, 8), 128);
+        assert!(adaptive_segment_count(64 * 1024 * 1024, 8) >= 8);
     }
 
     #[test]
