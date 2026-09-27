@@ -13,6 +13,7 @@ use reqwest::{
     Client, StatusCode,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     net::IpAddr,
@@ -79,33 +80,96 @@ pub async fn download_with_control(
 
     checkpoint(control.as_ref()).await?;
 
+    let expected_sha256 = normalize_expected_sha256(request.expected_sha256.as_deref())?;
+    let item = output_name(&request.output);
+    let completion_link = links[0].clone();
     let metadata = probe_url(&request.url, &request.headers).await?;
 
-    if metadata.accepts_ranges {
+    let mut result = if metadata.accepts_ranges {
         if let Some(size) = metadata.size {
             if size > 0 {
-                return download_segmented(
+                download_segmented(
                     request,
                     links,
                     size,
-                    transfer_id,
-                    progress,
-                    control,
+                    transfer_id.clone(),
+                    progress.clone(),
+                    control.clone(),
                 )
-                .await;
+                .await?
+            } else {
+                download_single(
+                    request,
+                    &completion_link,
+                    metadata.size,
+                    transfer_id.clone(),
+                    progress.clone(),
+                    control.clone(),
+                )
+                .await?
             }
+        } else {
+            download_single(
+                request,
+                &completion_link,
+                metadata.size,
+                transfer_id.clone(),
+                progress.clone(),
+                control.clone(),
+            )
+            .await?
         }
+    } else {
+        download_single(
+            request,
+            &completion_link,
+            metadata.size,
+            transfer_id.clone(),
+            progress.clone(),
+            control.clone(),
+        )
+        .await?
+    };
+
+    if let Some(expected) = expected_sha256 {
+        emit_progress(
+            progress.as_ref(),
+            &transfer_id,
+            "download",
+            &item,
+            "verifying",
+            0,
+            result.bytes_written,
+            Some(result.bytes_written),
+            &completion_link,
+            false,
+        );
+
+        checkpoint(control.as_ref()).await?;
+        let actual = sha256_file(&result.output, control.as_ref()).await?;
+
+        if actual != expected {
+            bail!("SHA-256 mismatch: expected {expected}, got {actual}");
+        }
+
+        result.sha256 = Some(actual);
+        result.verified = true;
     }
 
-    download_single(
-        request,
-        &links[0],
-        metadata.size,
-        transfer_id,
-        progress,
-        control,
-    )
-    .await
+    emit_progress(
+        progress.as_ref(),
+        &transfer_id,
+        "download",
+        &item,
+        if result.verified { "verified" } else { "completed" },
+        0,
+        result.bytes_written,
+        Some(result.bytes_written),
+        &completion_link,
+        true,
+    );
+
+    Ok(result)
 }
 
 async fn probe_url(url: &str, headers: &HashMap<String, String>) -> Result<ProbeResult> {
@@ -254,24 +318,13 @@ async fn download_single(
         );
     }
 
-    emit_progress(
-        progress.as_ref(),
-        &transfer_id,
-        "download",
-        &item,
-        "completed",
-        0,
-        written,
-        total_size.or(Some(written)),
-        link,
-        true,
-    );
-
     Ok(DownloadResult {
         output: request.output,
         bytes_written: written,
         segments: 1,
         links_used: vec![link.name.clone()],
+        sha256: None,
+        verified: false,
     })
 }
 
@@ -351,26 +404,13 @@ async fn download_segmented(
     assemble_parts(&part_dir, &request.output, segments).await?;
     fs::remove_dir_all(&part_dir).await?;
 
-    if let Some(link) = links.first() {
-        emit_progress(
-            progress.as_ref(),
-            &transfer_id,
-            "download",
-            &item,
-            "completed",
-            0,
-            size,
-            Some(size),
-            link,
-            true,
-        );
-    }
-
     Ok(DownloadResult {
         output: request.output,
         bytes_written: total,
         segments,
         links_used: used.into_iter().collect(),
+        sha256: None,
+        verified: false,
     })
 }
 
@@ -747,6 +787,40 @@ fn client_for(local_ip: IpAddr) -> Result<Client> {
         .context("failed to build HTTP client bound to local IP")
 }
 
+fn normalize_expected_sha256(value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let normalized = value.to_ascii_lowercase();
+    if normalized.len() != 64 || !normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        bail!("expected SHA-256 must contain exactly 64 hexadecimal characters");
+    }
+
+    Ok(Some(normalized))
+}
+
+async fn sha256_file(path: &Path, control: Option<&TransferControl>) -> Result<String> {
+    let mut file = File::open(path)
+        .await
+        .with_context(|| format!("cannot open {} for SHA-256 verification", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+
+    loop {
+        checkpoint(control).await?;
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+
+        hasher.update(&buffer[..read]);
+    }
+
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn adaptive_segment_count(size: u64, workers: usize) -> usize {
     const TARGET_MIN_SEGMENT: u64 = 8 * 1024 * 1024;
     const WAVES: usize = 16;
@@ -833,7 +907,10 @@ async fn assemble_parts(part_dir: &Path, output: &Path, segments: usize) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{adaptive_segment_count, segment_bounds, total_from_content_range, PartManifest};
+    use super::{
+        adaptive_segment_count, normalize_expected_sha256, segment_bounds, total_from_content_range,
+        PartManifest,
+    };
 
     #[test]
     fn segment_bounds_cover_entire_file_without_overlap() {
@@ -849,6 +926,15 @@ mod tests {
         let gib = 1024u64 * 1024 * 1024;
         assert_eq!(adaptive_segment_count(gib, 8), 128);
         assert!(adaptive_segment_count(64 * 1024 * 1024, 8) >= 8);
+    }
+
+    #[test]
+    fn validates_expected_sha256_format() {
+        let valid = "a".repeat(64);
+        assert_eq!(normalize_expected_sha256(Some(&valid)).unwrap(), Some(valid));
+        assert!(normalize_expected_sha256(Some("abc")).is_err());
+        assert!(normalize_expected_sha256(Some(&"z".repeat(64))).is_err());
+        assert_eq!(normalize_expected_sha256(None).unwrap(), None);
     }
 
     #[test]
