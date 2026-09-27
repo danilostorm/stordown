@@ -6,7 +6,7 @@ use reqwest::{
     Client, StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{
     cmp::min,
     net::IpAddr,
@@ -121,7 +121,7 @@ pub async fn upload_google_drive_file(
     if total_size == 0 {
         let response = client
             .put(&session_uri)
-            .header(CONTENT_LENGTH, 0)
+            .header(CONTENT_LENGTH, "0")
             .header(CONTENT_RANGE, "bytes */0")
             .send()
             .await?;
@@ -216,7 +216,7 @@ async fn create_resumable_session(
         .post(DRIVE_UPLOAD_URL)
         .bearer_auth(access_token)
         .header("X-Upload-Content-Type", mime_type)
-        .header("X-Upload-Content-Length", total_size)
+        .header("X-Upload-Content-Length", total_size.to_string())
         .json(&metadata)
         .send()
         .await
@@ -264,7 +264,7 @@ async fn upload_chunks(
             let response = client
                 .put(session_uri)
                 .header(CONTENT_TYPE, mime_type)
-                .header(CONTENT_LENGTH, length)
+                .header(CONTENT_LENGTH, length.to_string())
                 .header(
                     CONTENT_RANGE,
                     format!("bytes {offset}-{end}/{total_size}"),
@@ -299,10 +299,11 @@ async fn upload_chunks(
                     }
 
                     sleep(backoff(attempt)).await;
-                    offset = query_upload_offset(client, session_uri, total_size)
+                    let known_offset = query_upload_offset(client, session_uri, total_size)
                         .await
                         .unwrap_or(offset);
-                    if offset > end {
+                    if known_offset != offset {
+                        offset = known_offset;
                         break;
                     }
                 }
@@ -317,10 +318,11 @@ async fn upload_chunks(
                     }
 
                     sleep(backoff(attempt)).await;
-                    offset = query_upload_offset(client, session_uri, total_size)
+                    let known_offset = query_upload_offset(client, session_uri, total_size)
                         .await
                         .unwrap_or(offset);
-                    if offset > end {
+                    if known_offset != offset {
+                        offset = known_offset;
                         break;
                     }
                 }
