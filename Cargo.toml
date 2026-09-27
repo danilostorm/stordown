@@ -1,7 +1,8 @@
 [workspace]
 members = [
   "crates/stordown-core",
-  "apps/cli"
+  "apps/cli",
+  "apps/desktop/src-tauri"
 ]
 resolver = "2"
 
