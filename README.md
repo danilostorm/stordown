@@ -26,7 +26,8 @@ The repository currently contains:
 - unified download/upload queue with up to two simultaneous jobs;
 - persistent SQLite transfer history in the StorDown app-data folder;
 - native Windows save/open dialogs for download destinations and upload file selection;
-- Chrome/Edge native-messaging bridge with context-menu and beta automatic capture;
+- Chrome/Edge native-messaging bridge with context-menu and automatic capture;
+- explicit per-site cookie handoff for authenticated browser downloads;
 - automatic download categories and extension-based destination rules;
 - persistent HTTP download scheduler with restart recovery;
 - adaptive Multi-WAN chunk scheduling with automatic link failover;
@@ -304,3 +305,12 @@ failed chunk
 ```
 
 A single Google Drive resumable file is still sequential at the provider protocol level, so switching WANs improves failover and adaptation but does not make one file upload through two WANs in parallel. Parallel striping of one large upload remains the job of the planned StorDown Relay.
+
+
+## Authenticated browser downloads
+
+The Chrome/Edge extension can now capture downloads that depend on an authenticated browser session without asking for blanket cookie access.
+
+The user authorizes an individual website from the extension popup. Only then does the extension read cookies for that origin and attach a controlled `Cookie` header plus the download referrer to the Native Messaging request.
+
+The desktop sanitizes incoming browser headers against an allowlist and keeps them in memory for the HTTP transfer rather than storing cookie values in the normal SQLite history.
