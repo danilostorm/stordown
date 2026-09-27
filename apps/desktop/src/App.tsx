@@ -35,6 +35,13 @@ type LinkProbeStatus = {
   error?: string | null;
 };
 
+type GoogleAuthStatus = {
+  connected: boolean;
+  client_id?: string | null;
+  scope?: string | null;
+  expires_in_seconds?: number | null;
+};
+
 type View = "download" | "upload";
 
 export default function App() {
@@ -53,7 +60,9 @@ export default function App() {
     "C:\\Uploads\\arquivo1.mkv\nC:\\Uploads\\arquivo2.mkv",
   );
   const [driveParentId, setDriveParentId] = useState("");
-  const [driveToken, setDriveToken] = useState("");
+  const [driveClientId, setDriveClientId] = useState("");
+  const [driveAuth, setDriveAuth] = useState<GoogleAuthStatus>({ connected: false });
+  const [authBusy, setAuthBusy] = useState(false);
   const [chunkMiB, setChunkMiB] = useState(8);
 
   const links = useMemo(
@@ -128,6 +137,56 @@ export default function App() {
     }
   }
 
+  async function connectDrive() {
+    setAuthBusy(true);
+    setStatus("Abrindo login seguro do Google Drive no navegador…");
+
+    try {
+      const auth = await invoke<GoogleAuthStatus>("connect_google_drive", {
+        clientId: driveClientId || null,
+      });
+      setDriveAuth(auth);
+      setStatus("Google Drive conectado com sucesso");
+    } catch (error) {
+      setStatus(`Erro ao conectar Google Drive: ${String(error)}`);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function restoreDrive() {
+    setAuthBusy(true);
+    setStatus("Restaurando sessão segura do Google Drive…");
+
+    try {
+      const auth = await invoke<GoogleAuthStatus>("restore_google_drive", {
+        clientId: driveClientId || null,
+      });
+      setDriveAuth(auth);
+      setStatus("Sessão Google Drive restaurada");
+    } catch (error) {
+      setStatus(`Não foi possível restaurar a sessão: ${String(error)}`);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function disconnectDrive() {
+    setAuthBusy(true);
+
+    try {
+      const auth = await invoke<GoogleAuthStatus>("disconnect_google_drive", {
+        clientId: driveClientId || null,
+      });
+      setDriveAuth(auth);
+      setStatus("Google Drive desconectado deste Windows");
+    } catch (error) {
+      setStatus(`Erro ao desconectar Google Drive: ${String(error)}`);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function submitDownload(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -159,7 +218,6 @@ export default function App() {
     try {
       const result = await invoke<DriveUploadResult[]>("start_drive_upload", {
         files,
-        accessToken: driveToken,
         parentId: driveParentId || null,
         bindIps: links,
         chunkMib: chunkMiB,
@@ -364,16 +422,47 @@ export default function App() {
               </label>
             </div>
 
-            <label>
-              Google OAuth access token — temporário para desenvolvimento
-              <input
-                type="password"
-                value={driveToken}
-                onChange={(e) => setDriveToken(e.target.value)}
-                placeholder="OAuth será integrado ao botão Conectar Google Drive"
-                required
-              />
-            </label>
+            <div className="driveAuthCard">
+              <div>
+                <span className="driveAuthLabel">CONTA GOOGLE DRIVE</span>
+                <strong>
+                  {driveAuth.connected ? "Conectado com OAuth + PKCE" : "Conta não conectada"}
+                </strong>
+                <small>
+                  {driveAuth.connected
+                    ? "Refresh token protegido no armazenamento seguro do Windows."
+                    : "O login abre no navegador padrão; a senha nunca passa pelo StorDown."}
+                </small>
+              </div>
+
+              <div className="driveAuthActions">
+                {!driveAuth.connected ? (
+                  <>
+                    <button type="button" onClick={connectDrive} disabled={authBusy}>
+                      {authBusy ? "Conectando…" : "Conectar Google Drive"}
+                    </button>
+                    <button type="button" onClick={restoreDrive} disabled={authBusy}>
+                      Restaurar sessão
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" onClick={disconnectDrive} disabled={authBusy}>
+                    Desconectar
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {!driveAuth.connected && (
+              <label>
+                Google OAuth Client ID — desenvolvimento
+                <input
+                  value={driveClientId}
+                  onChange={(e) => setDriveClientId(e.target.value)}
+                  placeholder="Na versão distribuída, o Client ID do StorDown virá configurado"
+                />
+              </label>
+            )}
 
             <label>
               IPs das interfaces
@@ -391,7 +480,7 @@ export default function App() {
 
             <button
               className="primary"
-              disabled={busy || links.length === 0 || files.length === 0}
+              disabled={busy || links.length === 0 || files.length === 0 || !driveAuth.connected}
             >
               {busy ? "Enviando…" : `Enviar ${files.length} arquivo(s)`}
             </button>

@@ -13,8 +13,10 @@ authors = ["StorDown contributors"]
 
 [workspace.dependencies]
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
+rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

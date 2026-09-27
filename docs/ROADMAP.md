@@ -44,8 +44,8 @@
 
 ## V0.4 - Google Drive
 
-- [ ] OAuth desktop login
-- [ ] Secure refresh-token storage
+- [x] OAuth desktop login with PKCE + loopback callback
+- [x] Secure refresh-token storage using the Windows credential store
 - [ ] Drive browser / destination picker
 - [ ] Shared Drive browsing
 - [ ] Shared links
