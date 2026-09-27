@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpStream},
     time::Duration,
@@ -19,6 +20,8 @@ struct NativeRequest {
     filename: Option<String>,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,7 +101,8 @@ fn handle_message(payload: &[u8]) -> NativeResponse {
         "type": "download",
         "url": url,
         "filename": parsed.filename,
-        "source": parsed.source.unwrap_or_else(|| "browser".to_string())
+        "source": parsed.source.unwrap_or_else(|| "browser".to_string()),
+        "headers": parsed.headers
     }))
 }
 
