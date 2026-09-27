@@ -23,6 +23,8 @@ The repository currently contains:
 - live transfer progress and real-time speed per local interface/WAN;
 - pause, resume and cancel controls for active downloads/uploads;
 - persistent segmented HTTP download parts with automatic retry/resume;
+- unified download/upload queue with up to two simultaneous jobs;
+- persistent SQLite transfer history in the StorDown app-data folder;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -159,3 +161,23 @@ StorDown now keeps segmented HTTP download state beside the destination as a tem
 Each Range segment is written independently. If a segment connection drops, StorDown reopens that segment from the last byte already written instead of restarting the whole file. If the app is stopped or the transfer is cancelled, the partial segment files remain available. Starting the same URL again with the same destination, file size and segment count reuses those bytes.
 
 The desktop UI also exposes **Pausar**, **Retomar** and **Cancelar** for an active transfer. Google Drive uploads honor pause/cancel between resumable chunks. Drive session persistence across a full application restart remains a separate roadmap item.
+
+
+## Unified queue and persistent history
+
+Downloads and Google Drive uploads now enter the same StorDown queue instead of blocking the desktop UI until one transfer finishes.
+
+The first queue scheduler allows up to **two active transfer jobs at the same time**. Each job can still use multiple HTTP workers and multiple bound NIC/WAN paths internally.
+
+Transfer metadata is stored in a local SQLite database under the StorDown application-data directory. The database records:
+
+- transfer ID and direction;
+- source and destination;
+- provider;
+- status;
+- transferred and total bytes;
+- configured connection count;
+- bound local IPs;
+- timestamps and last error.
+
+On application startup, transfers that were left as running or paused are marked as **interrupted** so the UI never pretends that a dead process is still active. Completed, failed and cancelled entries remain visible in the history until the user removes them.
