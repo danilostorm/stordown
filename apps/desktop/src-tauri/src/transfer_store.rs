@@ -27,6 +27,7 @@ pub struct TransferRecord {
     pub bind_ips: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub scheduled_at: Option<i64>,
     pub error: Option<String>,
 }
 
@@ -40,6 +41,7 @@ pub struct NewTransferRecord {
     pub provider: String,
     pub connections: usize,
     pub bind_ips: Vec<String>,
+    pub scheduled_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +99,7 @@ impl TransferStore {
                     bind_ips_json TEXT NOT NULL DEFAULT '[]',
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
+                    scheduled_at INTEGER,
                     error TEXT
                 );
 
@@ -122,6 +125,8 @@ impl TransferStore {
                 "#,
             )
             .map_err(|error| format!("Falha ao preparar banco StorDown: {error}"))?;
+
+        ensure_column(&connection, "transfers", "scheduled_at", "INTEGER")?;
 
         connection
             .execute(
@@ -159,6 +164,7 @@ impl TransferStore {
                     bind_ips_json TEXT NOT NULL DEFAULT '[]',
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
+                    scheduled_at INTEGER,
                     error TEXT
                 );
 
@@ -187,13 +193,16 @@ impl TransferStore {
             serde_json::to_string(&record.bind_ips).map_err(|error| error.to_string())?;
         let connection = self.connection.lock().await;
 
+        let scheduled_at = record.scheduled_at.filter(|value| *value > now);
+        let initial_status = if scheduled_at.is_some() { "scheduled" } else { "queued" };
+
         connection
             .execute(
                 "INSERT INTO transfers (
                     id, direction, name, source, destination, provider, status,
                     bytes_transferred, total_bytes, connections, bind_ips_json,
-                    created_at, updated_at, error
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', 0, NULL, ?7, ?8, ?9, ?10, NULL)",
+                    created_at, updated_at, scheduled_at, error
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, NULL, ?8, ?9, ?10, ?11, ?12, NULL)",
                 params![
                     record.id,
                     record.direction,
@@ -201,10 +210,12 @@ impl TransferStore {
                     record.source,
                     record.destination,
                     record.provider,
+                    initial_status,
                     record.connections as i64,
                     bind_ips_json,
                     now,
                     now,
+                    scheduled_at,
                 ],
             )
             .map_err(|error| format!("Falha ao adicionar transferência à fila: {error}"))?;
@@ -221,7 +232,7 @@ impl TransferStore {
             .prepare(
                 "SELECT id, direction, name, source, destination, provider, status,
                         bytes_transferred, total_bytes, connections, bind_ips_json,
-                        created_at, updated_at, error
+                        created_at, updated_at, scheduled_at, error
                  FROM transfers
                  WHERE id = ?1",
             )
@@ -239,15 +250,16 @@ impl TransferStore {
             .prepare(
                 "SELECT id, direction, name, source, destination, provider, status,
                         bytes_transferred, total_bytes, connections, bind_ips_json,
-                        created_at, updated_at, error
+                        created_at, updated_at, scheduled_at, error
                  FROM transfers
                  ORDER BY
                     CASE status
                       WHEN 'running' THEN 0
                       WHEN 'paused' THEN 1
                       WHEN 'queued' THEN 2
-                      WHEN 'interrupted' THEN 3
-                      ELSE 4
+                      WHEN 'scheduled' THEN 3
+                      WHEN 'interrupted' THEN 4
+                      ELSE 5
                     END,
                     updated_at DESC
                  LIMIT ?1",
@@ -351,6 +363,27 @@ impl TransferStore {
                  WHERE status IN ('completed', 'failed', 'cancelled')",
                 [],
             )
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn list_scheduled(&self) -> Result<Vec<TransferRecord>, String> {
+        let connection = self.connection.lock().await;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, direction, name, source, destination, provider, status,
+                        bytes_transferred, total_bytes, connections, bind_ips_json,
+                        created_at, updated_at, scheduled_at, error
+                 FROM transfers
+                 WHERE status = 'scheduled' AND scheduled_at IS NOT NULL
+                 ORDER BY scheduled_at ASC",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = statement
+            .query_map([], row_to_record)
+            .map_err(|error| error.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
     }
 
@@ -476,6 +509,33 @@ impl TransferStore {
     }
 }
 
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    if !columns.iter().any(|name| name == column) {
+        connection
+            .execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map_err(|error| format!("Falha ao migrar banco StorDown: {error}"))?;
+    }
+
+    Ok(())
+}
+
 fn row_to_download_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRule> {
     let extensions_json: String = row.get(2)?;
     let extensions =
@@ -518,6 +578,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRecord> {
     let bytes: i64 = row.get(7)?;
     let total: Option<i64> = row.get(8)?;
     let connections: i64 = row.get(9)?;
+    let scheduled_at: Option<i64> = row.get(13)?;
 
     Ok(TransferRecord {
         id: row.get(0)?,
@@ -533,7 +594,8 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRecord> {
         bind_ips,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
-        error: row.get(13)?,
+        scheduled_at,
+        error: row.get(14)?,
     })
 }
 
@@ -595,6 +657,7 @@ mod tests {
                 provider: "http".to_string(),
                 connections: 8,
                 bind_ips: vec!["192.168.1.10".to_string(), "192.168.1.11".to_string()],
+                scheduled_at: None,
             })
             .await
             .unwrap();
