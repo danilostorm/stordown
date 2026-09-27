@@ -18,8 +18,13 @@ use stordown_core::{
     GoogleDriveBatchUploadRequest, LinkConfig, LinkProbeStatus, ProgressCallback, TransferControl,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener,
+    sync::{Mutex, Semaphore},
+};
 use transfer_store::{NewTransferRecord, TransferRecord, TransferStore};
+use uuid::Uuid;
 
 const GOOGLE_KEYRING_SERVICE: &str = "StorDown Google Drive";
 const DEFAULT_QUEUE_CONCURRENCY: usize = 2;
@@ -32,6 +37,23 @@ struct NetworkInterfaceInfo {
     gateway: Option<String>,
     link_speed: Option<String>,
     index: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BrowserCaptureRequest {
+    #[serde(rename = "type")]
+    kind: String,
+    url: Option<String>,
+    filename: Option<String>,
+    source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserCaptureResponse {
+    ok: bool,
+    transfer_id: Option<String>,
+    status: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -316,17 +338,16 @@ async fn current_google_access_token(state: &GoogleAuthState) -> Result<String, 
     Ok(session.access_token.clone())
 }
 
-#[tauri::command]
-async fn enqueue_download(
+async fn enqueue_download_job(
     url: String,
     output: String,
     connections: usize,
     bind_ips: Vec<String>,
     transfer_id: String,
     app: AppHandle,
-    queue_state: State<'_, QueueState>,
-    control_state: State<'_, TransferControlState>,
-    store: State<'_, TransferStore>,
+    queue_state: QueueState,
+    control_state: TransferControlState,
+    store: TransferStore,
 ) -> Result<TransferRecord, String> {
     let links = parse_links(bind_ips.clone())?;
     let name = file_name_from_path(&output, "download");
@@ -343,10 +364,9 @@ async fn enqueue_download(
         })
         .await?;
 
-    let control = register_transfer(&transfer_id, control_state.inner()).await;
-    let queue = queue_state.inner().clone();
-    let controls = control_state.inner().clone();
-    let store = store.inner().clone();
+    let control = register_transfer(&transfer_id, &control_state).await;
+    let queue = queue_state.clone();
+    let controls = control_state.clone();
     let task_store = store.clone();
     let task_app = app.clone();
 
@@ -393,7 +413,7 @@ async fn enqueue_download(
                     .complete(&transfer_id, result.bytes_written, Some(result.bytes_written))
                     .await;
             }
-            Err(error) if control.is_cancelled() => {
+            Err(_) if control.is_cancelled() => {
                 let _ = task_store.update_status(&transfer_id, "cancelled", None).await;
             }
             Err(error) => {
@@ -409,6 +429,32 @@ async fn enqueue_download(
     });
 
     Ok(record)
+}
+
+#[tauri::command]
+async fn enqueue_download(
+    url: String,
+    output: String,
+    connections: usize,
+    bind_ips: Vec<String>,
+    transfer_id: String,
+    app: AppHandle,
+    queue_state: State<'_, QueueState>,
+    control_state: State<'_, TransferControlState>,
+    store: State<'_, TransferStore>,
+) -> Result<TransferRecord, String> {
+    enqueue_download_job(
+        url,
+        output,
+        connections,
+        bind_ips,
+        transfer_id,
+        app,
+        queue_state.inner().clone(),
+        control_state.inner().clone(),
+        store.inner().clone(),
+    )
+    .await
 }
 
 #[tauri::command]
