@@ -593,3 +593,45 @@ input:focus, textarea:focus, select:focus {
   text-align: center;
   font-size: 13px;
 }
+
+
+.fieldWithButton,
+.uploadPicker {
+  display: grid;
+  gap: 8px;
+}
+
+.fieldWithButton {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.uploadPicker button,
+.fieldWithButton button {
+  border: 1px solid #34405a;
+  border-radius: 10px;
+  padding: 10px 13px;
+  background: #172033;
+  color: #eef1ff;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.uploadPicker button {
+  justify-self: start;
+}
+
+.uploadPicker button:hover,
+.fieldWithButton button:hover {
+  border-color: #6476ff;
+}
+
+@media (max-width: 1080px) {
+  .fieldWithButton {
+    grid-template-columns: 1fr;
+  }
+
+  .fieldWithButton button {
+    justify-self: start;
+  }
+}
