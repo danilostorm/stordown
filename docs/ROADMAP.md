@@ -23,7 +23,7 @@
 ## V0.2 - Desktop transfer manager
 
 - [x] Unified download/upload queue
-- [ ] Categories and destination rules
+- [x] Categories and destination rules for browser-captured downloads
 - [x] Persistent SQLite history
 - [ ] Scheduler
 - [ ] Speed limits

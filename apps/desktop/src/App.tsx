@@ -56,12 +56,23 @@ type TransferRecord = {
   error?: string | null;
 };
 
+type DownloadRule = {
+  id: number;
+  name: string;
+  extensions: string[];
+  destination: string;
+  enabled: boolean;
+  priority: number;
+  created_at: number;
+  updated_at: number;
+};
+
 type SpeedWindow = {
   startedAt: number;
   bytes: number;
 };
 
-type View = "download" | "upload" | "queue" | "finished";
+type View = "download" | "upload" | "queue" | "finished" | "settings";
 
 const activeStatuses = new Set(["queued", "running", "paused", "interrupted"]);
 const finishedStatuses = new Set(["completed", "failed", "cancelled"]);
@@ -91,6 +102,13 @@ export default function App() {
   const [progressByItem, setProgressByItem] = useState<Record<string, TransferProgress>>({});
   const [linkSpeeds, setLinkSpeeds] = useState<Record<string, number>>({});
   const [records, setRecords] = useState<TransferRecord[]>([]);
+  const [downloadRules, setDownloadRules] = useState<DownloadRule[]>([]);
+  const [ruleId, setRuleId] = useState<number | null>(null);
+  const [ruleName, setRuleName] = useState("Vídeos");
+  const [ruleExtensions, setRuleExtensions] = useState("mkv, mp4, avi, mov");
+  const [ruleDestination, setRuleDestination] = useState("C:\\Downloads\\Vídeos");
+  const [ruleEnabled, setRuleEnabled] = useState(true);
+  const [rulePriority, setRulePriority] = useState(100);
   const speedWindows = useRef<Record<string, SpeedWindow>>({});
 
   const links = useMemo(
@@ -164,8 +182,18 @@ export default function App() {
     }
   }
 
+  async function reloadDownloadRules() {
+    try {
+      const rules = await invoke<DownloadRule[]>("list_download_rules");
+      setDownloadRules(rules);
+    } catch (error) {
+      setStatus(`Erro ao carregar categorias: ${String(error)}`);
+    }
+  }
+
   useEffect(() => {
     reloadTransfers();
+    reloadDownloadRules();
 
     let stopProgress: undefined | (() => void);
     let stopList: undefined | (() => void);
@@ -448,6 +476,69 @@ export default function App() {
     }
   }
 
+  function resetRuleForm() {
+    setRuleId(null);
+    setRuleName("Vídeos");
+    setRuleExtensions("mkv, mp4, avi, mov");
+    setRuleDestination("C:\\Downloads\\Vídeos");
+    setRuleEnabled(true);
+    setRulePriority(100);
+  }
+
+  function editRule(rule: DownloadRule) {
+    setRuleId(rule.id);
+    setRuleName(rule.name);
+    setRuleExtensions(rule.extensions.join(", "));
+    setRuleDestination(rule.destination);
+    setRuleEnabled(rule.enabled);
+    setRulePriority(rule.priority);
+    setView("settings");
+  }
+
+  async function chooseRuleFolder() {
+    try {
+      const picked = await invoke<string | null>("pick_download_rule_folder");
+      if (picked) setRuleDestination(picked);
+    } catch (error) {
+      setStatus(`Erro ao selecionar pasta: ${String(error)}`);
+    }
+  }
+
+  async function saveRule(event: FormEvent) {
+    event.preventDefault();
+
+    try {
+      await invoke<DownloadRule>("save_download_rule", {
+        id: ruleId,
+        name: ruleName,
+        extensions: ruleExtensions
+          .split(/[;,\s]+/)
+          .map((value) => value.trim())
+          .filter(Boolean),
+        destination: ruleDestination,
+        enabled: ruleEnabled,
+        priority: rulePriority,
+      });
+
+      await reloadDownloadRules();
+      setStatus(ruleId ? "Categoria atualizada" : "Categoria criada");
+      resetRuleForm();
+    } catch (error) {
+      setStatus(`Erro ao salvar categoria: ${String(error)}`);
+    }
+  }
+
+  async function removeRule(id: number) {
+    try {
+      await invoke("delete_download_rule", { id });
+      await reloadDownloadRules();
+      if (ruleId === id) resetRuleForm();
+      setStatus("Categoria removida");
+    } catch (error) {
+      setStatus(`Erro ao remover categoria: ${String(error)}`);
+    }
+  }
+
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -488,7 +579,12 @@ export default function App() {
           </button>
           <button className="navItem" disabled>Cloud</button>
           <button className="navItem" disabled>Agendador</button>
-          <button className="navItem" disabled>Configurações</button>
+          <button
+            className={`navItem ${view === "settings" ? "active" : ""}`}
+            onClick={() => setView("settings")}
+          >
+            Configurações
+          </button>
         </nav>
 
         <div className="networkCard">
@@ -747,6 +843,130 @@ export default function App() {
               onDelete={deleteHistory}
             />
           </>
+        )}
+
+        {view === "settings" && (
+          <section className="settingsGrid">
+            <form className="downloadCard ruleEditor" onSubmit={saveRule}>
+              <div className="notice">
+                <strong>Categorias automáticas de download</strong>
+                <span>
+                  Downloads capturados pelo Chrome/Edge podem ir automaticamente para uma pasta
+                  conforme a extensão do arquivo.
+                </span>
+              </div>
+
+              <div className="grid2">
+                <label>
+                  Categoria
+                  <input
+                    value={ruleName}
+                    onChange={(event) => setRuleName(event.target.value)}
+                    placeholder="Vídeos"
+                    required
+                  />
+                </label>
+
+                <label>
+                  Extensões
+                  <input
+                    value={ruleExtensions}
+                    onChange={(event) => setRuleExtensions(event.target.value)}
+                    placeholder="mkv, mp4, avi"
+                    required
+                  />
+                </label>
+              </div>
+
+              <label>
+                Pasta de destino
+                <div className="fieldWithButton">
+                  <input
+                    value={ruleDestination}
+                    onChange={(event) => setRuleDestination(event.target.value)}
+                    required
+                  />
+                  <button type="button" onClick={chooseRuleFolder}>
+                    Selecionar…
+                  </button>
+                </div>
+              </label>
+
+              <div className="ruleOptions">
+                <label className="checkRow">
+                  <input
+                    type="checkbox"
+                    checked={ruleEnabled}
+                    onChange={(event) => setRuleEnabled(event.target.checked)}
+                  />
+                  Regra ativa
+                </label>
+
+                <label>
+                  Prioridade
+                  <input
+                    type="number"
+                    min={0}
+                    max={9999}
+                    value={rulePriority}
+                    onChange={(event) => setRulePriority(Number(event.target.value))}
+                  />
+                </label>
+              </div>
+
+              <div className="ruleFormActions">
+                <button className="primary" type="submit">
+                  {ruleId ? "Salvar alterações" : "Criar categoria"}
+                </button>
+                {ruleId !== null && (
+                  <button type="button" onClick={resetRuleForm}>
+                    Nova categoria
+                  </button>
+                )}
+              </div>
+            </form>
+
+            <section className="ruleList">
+              <div className="listToolbar">
+                <span>{downloadRules.length} categoria(s)</span>
+                <small>Menor prioridade numérica é aplicada primeiro.</small>
+              </div>
+
+              {downloadRules.length === 0 ? (
+                <div className="emptyState">
+                  Nenhuma categoria criada. O navegador continuará usando a pasta Downloads padrão.
+                </div>
+              ) : (
+                downloadRules.map((rule) => (
+                  <article className="ruleRow" key={rule.id}>
+                    <div className="ruleInfo">
+                      <div className="transferTitle">
+                        <strong>{rule.name}</strong>
+                        <span className={`ruleState ${rule.enabled ? "enabled" : "disabled"}`}>
+                          {rule.enabled ? "Ativa" : "Desativada"}
+                        </span>
+                      </div>
+                      <div className="ruleMeta">
+                        <span>{rule.extensions.map((ext) => `.${ext}`).join("  ")}</span>
+                        <span>{rule.destination}</span>
+                        <span>Prioridade {rule.priority}</span>
+                      </div>
+                    </div>
+                    <div className="rowActions">
+                      <button type="button" onClick={() => editRule(rule)}>Editar</button>
+                      <button
+                        type="button"
+                        className="dangerButton"
+                        onClick={() => removeRule(rule.id)}
+                      >
+                        Remover
+                      </button>
+                    </div>
+                  </article>
+                ))
+              )}
+            </section>
+          </section>
         )}
 
         {selectedRecord && (activeProgress.length > 0 || activeStatuses.has(selectedRecord.status)) && (
@@ -1022,6 +1242,7 @@ function viewTitle(view: View) {
   if (view === "download") return "Novo download";
   if (view === "upload") return "Upload para Google Drive";
   if (view === "queue") return "Fila de transferências";
+  if (view === "settings") return "Configurações";
   return "Histórico";
 }
 
@@ -1034,6 +1255,9 @@ function viewSubtitle(view: View) {
   }
   if (view === "queue") {
     return "Downloads e uploads em uma fila única, com até duas transferências simultâneas.";
+  }
+  if (view === "settings") {
+    return "Categorias e regras automáticas para organizar downloads capturados pelo navegador.";
   }
   return "Transferências concluídas, canceladas e com falha ficam salvas entre reinicializações.";
 }
