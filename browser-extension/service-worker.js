@@ -9,10 +9,11 @@ chrome.runtime.onInstalled.addListener(() => {
     });
   });
 
-  chrome.storage.local.get("autoCapture").then((settings) => {
-    if (settings.autoCapture === undefined) {
-      chrome.storage.local.set({ autoCapture: false });
-    }
+  chrome.storage.local.get(["autoCapture", "authenticatedCapture"]).then((settings) => {
+    const defaults = {};
+    if (settings.autoCapture === undefined) defaults.autoCapture = false;
+    if (settings.authenticatedCapture === undefined) defaults.authenticatedCapture = false;
+    if (Object.keys(defaults).length > 0) chrome.storage.local.set(defaults);
   });
 });
 
@@ -32,6 +33,47 @@ function sendToStorDown(payload) {
   });
 }
 
+async function buildCaptureHeaders(url, referrer) {
+  const headers = {};
+
+  if (referrer && /^https?:\/\//i.test(referrer)) {
+    headers.Referer = referrer;
+  }
+
+  if (navigator.userAgent) {
+    headers["User-Agent"] = navigator.userAgent;
+  }
+
+  const { authenticatedCapture = false } =
+    await chrome.storage.local.get("authenticatedCapture");
+
+  if (!authenticatedCapture) {
+    return headers;
+  }
+
+  try {
+    const allowed = await chrome.permissions.contains({
+      permissions: ["cookies"],
+      origins: ["http://*/*", "https://*/*"],
+    });
+
+    if (!allowed) {
+      return headers;
+    }
+
+    const cookies = await chrome.cookies.getAll({ url });
+    if (cookies.length > 0) {
+      headers.Cookie = cookies
+        .map((cookie) => `${cookie.name}=${cookie.value}`)
+        .join("; ");
+    }
+  } catch (error) {
+    console.warn("StorDown could not collect authenticated headers:", error);
+  }
+
+  return headers;
+}
+
 async function flashBadge(text) {
   await chrome.action.setBadgeText({ text });
   setTimeout(() => chrome.action.setBadgeText({ text: "" }), 1800);
@@ -42,9 +84,11 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
     return;
   }
 
+  const headers = await buildCaptureHeaders(info.linkUrl, info.pageUrl || null);
   const response = await sendToStorDown({
     type: "download",
     url: info.linkUrl,
+    headers,
     source: "context-menu",
   });
 
@@ -58,10 +102,12 @@ chrome.downloads.onCreated.addListener(async (item) => {
     return;
   }
 
+  const headers = await buildCaptureHeaders(item.url, item.referrer || null);
   const response = await sendToStorDown({
     type: "download",
     url: item.url,
     filename: item.filename || null,
+    headers,
     source: "browser-download",
   });
 
