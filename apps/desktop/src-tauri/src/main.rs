@@ -896,7 +896,7 @@ fn sanitize_windows_file_name(value: &str) -> String {
         })
         .collect();
 
-    let cleaned = cleaned.trim_matches([' ', '.']);
+    let cleaned = cleaned.trim_matches(|ch| ch == ' ' || ch == '.');
     if cleaned.is_empty() {
         "download.bin".to_string()
     } else {
