@@ -1,0 +1,439 @@
+use crate::model::LinkConfig;
+use anyhow::{bail, Context, Result};
+use reqwest::{
+    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE},
+    redirect::Policy,
+    Client, StatusCode,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{
+    cmp::min,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncSeekExt, SeekFrom},
+    task::JoinSet,
+    time::sleep,
+};
+
+const DRIVE_UPLOAD_URL: &str =
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id,name,size,webViewLink";
+const DRIVE_CHUNK_GRANULARITY: u64 = 256 * 1024;
+const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+const MAX_CHUNK_RETRIES: usize = 5;
+
+#[derive(Debug, Clone)]
+pub struct GoogleDriveUploadRequest {
+    pub source: PathBuf,
+    pub access_token: String,
+    pub parent_id: Option<String>,
+    pub remote_name: Option<String>,
+    pub mime_type: Option<String>,
+    pub chunk_size: u64,
+}
+
+impl GoogleDriveUploadRequest {
+    pub fn new(source: PathBuf, access_token: String) -> Self {
+        Self {
+            source,
+            access_token,
+            parent_id: None,
+            remote_name: None,
+            mime_type: None,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GoogleDriveBatchUploadRequest {
+    pub files: Vec<PathBuf>,
+    pub access_token: String,
+    pub parent_id: Option<String>,
+    pub chunk_size: u64,
+    pub links: Vec<LinkConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveUploadResult {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+    pub web_view_link: Option<String>,
+    pub bytes_uploaded: u64,
+    pub link_used: String,
+    pub local_ip: IpAddr,
+}
+
+#[derive(Debug, Deserialize)]
+struct DriveFileResponse {
+    id: String,
+    name: String,
+    #[serde(default)]
+    size: Option<String>,
+    #[serde(rename = "webViewLink")]
+    web_view_link: Option<String>,
+}
+
+pub async fn upload_google_drive_file(
+    request: GoogleDriveUploadRequest,
+    link: LinkConfig,
+) -> Result<GoogleDriveUploadResult> {
+    validate_chunk_size(request.chunk_size)?;
+
+    if !link.enabled {
+        bail!("selected link {} is disabled", link.name);
+    }
+
+    let metadata = tokio::fs::metadata(&request.source)
+        .await
+        .with_context(|| format!("cannot read {}", request.source.display()))?;
+
+    if !metadata.is_file() {
+        bail!("{} is not a regular file", request.source.display());
+    }
+
+    let total_size = metadata.len();
+    let remote_name = request
+        .remote_name
+        .clone()
+        .unwrap_or_else(|| file_name(&request.source));
+    let mime_type = request
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    let client = drive_client(link.local_ip)?;
+    let session_uri = create_resumable_session(
+        &client,
+        &request.access_token,
+        request.parent_id.as_deref(),
+        &remote_name,
+        &mime_type,
+        total_size,
+    )
+    .await?;
+
+    if total_size == 0 {
+        let response = client
+            .put(&session_uri)
+            .header(CONTENT_LENGTH, 0)
+            .header(CONTENT_RANGE, "bytes */0")
+            .send()
+            .await?;
+        let response = response.error_for_status()?;
+        let file: DriveFileResponse = response.json().await?;
+        return Ok(to_result(file, 0, &link));
+    }
+
+    upload_chunks(
+        &client,
+        &session_uri,
+        &request.source,
+        &mime_type,
+        total_size,
+        request.chunk_size,
+        &link,
+    )
+    .await
+}
+
+pub async fn upload_google_drive_batch(
+    request: GoogleDriveBatchUploadRequest,
+) -> Result<Vec<GoogleDriveUploadResult>> {
+    validate_chunk_size(request.chunk_size)?;
+
+    let enabled_links: Vec<LinkConfig> = request
+        .links
+        .into_iter()
+        .filter(|link| link.enabled)
+        .collect();
+
+    if enabled_links.is_empty() {
+        bail!("at least one enabled link is required");
+    }
+
+    if request.files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let weighted_links = expand_weighted_links(&enabled_links);
+    let mut jobs = JoinSet::new();
+
+    for (index, source) in request.files.into_iter().enumerate() {
+        let link = weighted_links[index % weighted_links.len()].clone();
+        let access_token = request.access_token.clone();
+        let parent_id = request.parent_id.clone();
+        let chunk_size = request.chunk_size;
+
+        jobs.spawn(async move {
+            let result = upload_google_drive_file(
+                GoogleDriveUploadRequest {
+                    source,
+                    access_token,
+                    parent_id,
+                    remote_name: None,
+                    mime_type: None,
+                    chunk_size,
+                },
+                link,
+            )
+            .await?;
+
+            Ok::<_, anyhow::Error>((index, result))
+        });
+    }
+
+    let mut results = Vec::new();
+
+    while let Some(joined) = jobs.join_next().await {
+        results.push(joined??);
+    }
+
+    results.sort_by_key(|(index, _)| *index);
+    Ok(results.into_iter().map(|(_, result)| result).collect())
+}
+
+async fn create_resumable_session(
+    client: &Client,
+    access_token: &str,
+    parent_id: Option<&str>,
+    remote_name: &str,
+    mime_type: &str,
+    total_size: u64,
+) -> Result<String> {
+    let mut metadata = json!({ "name": remote_name });
+
+    if let Some(parent_id) = parent_id.filter(|value| !value.trim().is_empty()) {
+        metadata["parents"] = json!([parent_id]);
+    }
+
+    let response = client
+        .post(DRIVE_UPLOAD_URL)
+        .bearer_auth(access_token)
+        .header("X-Upload-Content-Type", mime_type)
+        .header("X-Upload-Content-Length", total_size)
+        .json(&metadata)
+        .send()
+        .await
+        .context("failed to create Google Drive resumable upload session")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!("Google Drive session creation failed ({status}): {body}");
+    }
+
+    response
+        .headers()
+        .get(LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .context("Google Drive did not return a resumable session Location")
+}
+
+async fn upload_chunks(
+    client: &Client,
+    session_uri: &str,
+    source: &Path,
+    mime_type: &str,
+    total_size: u64,
+    chunk_size: u64,
+    link: &LinkConfig,
+) -> Result<GoogleDriveUploadResult> {
+    let mut file = File::open(source).await?;
+    let mut offset = 0u64;
+
+    while offset < total_size {
+        let length = min(chunk_size, total_size - offset);
+        file.seek(SeekFrom::Start(offset)).await?;
+
+        let mut buffer = vec![0u8; length as usize];
+        file.read_exact(&mut buffer).await?;
+
+        let end = offset + length - 1;
+        let mut attempt = 0usize;
+
+        loop {
+            attempt += 1;
+
+            let response = client
+                .put(session_uri)
+                .header(CONTENT_TYPE, mime_type)
+                .header(CONTENT_LENGTH, length)
+                .header(
+                    CONTENT_RANGE,
+                    format!("bytes {offset}-{end}/{total_size}"),
+                )
+                .body(buffer.clone())
+                .send()
+                .await;
+
+            match response {
+                Ok(response)
+                    if response.status() == StatusCode::OK
+                        || response.status() == StatusCode::CREATED =>
+                {
+                    let uploaded: DriveFileResponse = response
+                        .json()
+                        .await
+                        .context("invalid Google Drive completion response")?;
+                    return Ok(to_result(uploaded, total_size, link));
+                }
+                Ok(response) if response.status().as_u16() == 308 => {
+                    offset = next_offset_from_range(response.headers().get(RANGE), end + 1);
+                    break;
+                }
+                Ok(response)
+                    if response.status().is_server_error()
+                        || response.status() == StatusCode::TOO_MANY_REQUESTS =>
+                {
+                    if attempt >= MAX_CHUNK_RETRIES {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        bail!("Google Drive upload failed after retries ({status}): {body}");
+                    }
+
+                    sleep(backoff(attempt)).await;
+                    offset = query_upload_offset(client, session_uri, total_size)
+                        .await
+                        .unwrap_or(offset);
+                    if offset > end {
+                        break;
+                    }
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    bail!("Google Drive upload failed ({status}): {body}");
+                }
+                Err(error) => {
+                    if attempt >= MAX_CHUNK_RETRIES {
+                        return Err(error).context("Google Drive chunk upload failed after retries");
+                    }
+
+                    sleep(backoff(attempt)).await;
+                    offset = query_upload_offset(client, session_uri, total_size)
+                        .await
+                        .unwrap_or(offset);
+                    if offset > end {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    bail!("Google Drive upload ended without a completion response")
+}
+
+async fn query_upload_offset(client: &Client, session_uri: &str, total_size: u64) -> Result<u64> {
+    let response = client
+        .put(session_uri)
+        .header(CONTENT_LENGTH, 0)
+        .header(CONTENT_RANGE, format!("bytes */{total_size}"))
+        .send()
+        .await?;
+
+    if response.status().as_u16() == 308 {
+        return Ok(next_offset_from_range(response.headers().get(RANGE), 0));
+    }
+
+    if response.status() == StatusCode::OK || response.status() == StatusCode::CREATED {
+        return Ok(total_size);
+    }
+
+    bail!("unable to query Google Drive upload status: {}", response.status())
+}
+
+fn next_offset_from_range(range: Option<&reqwest::header::HeaderValue>, fallback: u64) -> u64 {
+    range
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit_once('-'))
+        .and_then(|(_, end)| end.parse::<u64>().ok())
+        .map(|end| end.saturating_add(1))
+        .unwrap_or(fallback)
+}
+
+fn drive_client(local_ip: IpAddr) -> Result<Client> {
+    Client::builder()
+        .local_address(local_ip)
+        .redirect(Policy::none())
+        .build()
+        .context("failed to build Google Drive client bound to local IP")
+}
+
+fn expand_weighted_links(links: &[LinkConfig]) -> Vec<LinkConfig> {
+    let mut result = Vec::new();
+
+    for link in links {
+        for _ in 0..link.weight.max(1) {
+            result.push(link.clone());
+        }
+    }
+
+    result
+}
+
+fn validate_chunk_size(chunk_size: u64) -> Result<()> {
+    if chunk_size == 0 || chunk_size % DRIVE_CHUNK_GRANULARITY != 0 {
+        bail!(
+            "Google Drive chunk size must be a non-zero multiple of 256 KiB"
+        );
+    }
+
+    Ok(())
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("upload.bin")
+        .to_owned()
+}
+
+fn to_result(
+    file: DriveFileResponse,
+    bytes_uploaded: u64,
+    link: &LinkConfig,
+) -> GoogleDriveUploadResult {
+    GoogleDriveUploadResult {
+        id: file.id,
+        name: file.name,
+        size: file
+            .size
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(bytes_uploaded),
+        web_view_link: file.web_view_link,
+        bytes_uploaded,
+        link_used: link.name.clone(),
+        local_ip: link.local_ip,
+    }
+}
+
+fn backoff(attempt: usize) -> Duration {
+    Duration::from_millis(500 * 2u64.pow((attempt.saturating_sub(1)).min(4) as u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_offset_from_range, validate_chunk_size};
+    use reqwest::header::HeaderValue;
+
+    #[test]
+    fn drive_chunk_size_must_use_256_kib_granularity() {
+        assert!(validate_chunk_size(8 * 1024 * 1024).is_ok());
+        assert!(validate_chunk_size(1024 * 1024).is_ok());
+        assert!(validate_chunk_size(12345).is_err());
+    }
+
+    #[test]
+    fn parses_drive_resume_range() {
+        let header = HeaderValue::from_static("bytes=0-524287");
+        assert_eq!(next_offset_from_range(Some(&header), 0), 524288);
+    }
+}
