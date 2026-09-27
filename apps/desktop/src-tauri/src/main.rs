@@ -11,10 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 use stordown_core::{
-    authorize_google_drive_desktop, download_with_progress, probe_links,
-    refresh_google_access_token, upload_google_drive_batch_with_progress, DownloadRequest,
+    authorize_google_drive_desktop, download_with_control, probe_links,
+    refresh_google_access_token, upload_google_drive_batch_with_control, DownloadRequest,
     DownloadResult, GoogleDriveBatchUploadRequest, GoogleDriveUploadResult, LinkConfig,
-    LinkProbeStatus, ProgressCallback,
+    LinkProbeStatus, ProgressCallback, TransferControl,
 };
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
@@ -51,6 +51,48 @@ struct GoogleAuthStatus {
     client_id: Option<String>,
     scope: Option<String>,
     expires_in_seconds: Option<u64>,
+}
+
+#[derive(Default)]
+struct TransferControlState {
+    controls: Mutex<HashMap<String, TransferControl>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TransferControlStatus {
+    transfer_id: String,
+    paused: bool,
+    cancelled: bool,
+}
+
+async fn register_transfer(
+    transfer_id: &str,
+    state: &TransferControlState,
+) -> TransferControl {
+    let control = TransferControl::default();
+    state
+        .controls
+        .lock()
+        .await
+        .insert(transfer_id.to_string(), control.clone());
+    control
+}
+
+async fn remove_transfer(transfer_id: &str, state: &TransferControlState) {
+    state.controls.lock().await.remove(transfer_id);
+}
+
+async fn get_transfer_control(
+    transfer_id: &str,
+    state: &TransferControlState,
+) -> Result<TransferControl, String> {
+    state
+        .controls
+        .lock()
+        .await
+        .get(transfer_id)
+        .cloned()
+        .ok_or_else(|| format!("Transferência não encontrada: {transfer_id}"))
 }
 
 fn progress_emitter(app: AppHandle) -> ProgressCallback {
@@ -251,10 +293,12 @@ async fn start_download(
     bind_ips: Vec<String>,
     transfer_id: String,
     app: AppHandle,
+    control_state: State<'_, TransferControlState>,
 ) -> Result<DownloadResult, String> {
     let links = parse_links(bind_ips)?;
+    let control = register_transfer(&transfer_id, control_state.inner()).await;
 
-    download_with_progress(
+    let result = download_with_control(
         DownloadRequest {
             url,
             output: PathBuf::from(output),
@@ -262,11 +306,15 @@ async fn start_download(
             links,
             headers: HashMap::new(),
         },
-        transfer_id,
+        transfer_id.clone(),
         Some(progress_emitter(app)),
+        Some(control),
     )
     .await
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string());
+
+    remove_transfer(&transfer_id, control_state.inner()).await;
+    result
 }
 
 #[tauri::command]
@@ -277,19 +325,20 @@ async fn start_drive_upload(
     chunk_mib: u64,
     transfer_id: String,
     app: AppHandle,
-    state: State<'_, GoogleAuthState>,
+    auth_state: State<'_, GoogleAuthState>,
+    control_state: State<'_, TransferControlState>,
 ) -> Result<Vec<GoogleDriveUploadResult>, String> {
     if files.is_empty() {
         return Err("Adicione pelo menos um arquivo para upload".to_string());
     }
 
-    let access_token = current_google_access_token(state.inner()).await?;
-
+    let access_token = current_google_access_token(auth_state.inner()).await?;
     let chunk_size = chunk_mib
         .checked_mul(1024 * 1024)
         .ok_or_else(|| "Tamanho de bloco inválido".to_string())?;
+    let control = register_transfer(&transfer_id, control_state.inner()).await;
 
-    upload_google_drive_batch_with_progress(
+    let result = upload_google_drive_batch_with_control(
         GoogleDriveBatchUploadRequest {
             files: files.into_iter().map(PathBuf::from).collect(),
             access_token,
@@ -297,11 +346,60 @@ async fn start_drive_upload(
             chunk_size,
             links: parse_links(bind_ips)?,
         },
-        transfer_id,
+        transfer_id.clone(),
         Some(progress_emitter(app)),
+        Some(control),
     )
     .await
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string());
+
+    remove_transfer(&transfer_id, control_state.inner()).await;
+    result
+}
+
+#[tauri::command]
+async fn pause_transfer(
+    transfer_id: String,
+    state: State<'_, TransferControlState>,
+) -> Result<TransferControlStatus, String> {
+    let control = get_transfer_control(&transfer_id, state.inner()).await?;
+    control.pause();
+
+    Ok(TransferControlStatus {
+        transfer_id,
+        paused: true,
+        cancelled: control.is_cancelled(),
+    })
+}
+
+#[tauri::command]
+async fn resume_transfer(
+    transfer_id: String,
+    state: State<'_, TransferControlState>,
+) -> Result<TransferControlStatus, String> {
+    let control = get_transfer_control(&transfer_id, state.inner()).await?;
+    control.resume();
+
+    Ok(TransferControlStatus {
+        transfer_id,
+        paused: false,
+        cancelled: control.is_cancelled(),
+    })
+}
+
+#[tauri::command]
+async fn cancel_transfer(
+    transfer_id: String,
+    state: State<'_, TransferControlState>,
+) -> Result<TransferControlStatus, String> {
+    let control = get_transfer_control(&transfer_id, state.inner()).await?;
+    control.cancel();
+
+    Ok(TransferControlStatus {
+        transfer_id,
+        paused: false,
+        cancelled: true,
+    })
 }
 
 #[tauri::command]
@@ -373,9 +471,13 @@ fn discover_windows_interfaces() -> Result<Vec<NetworkInterfaceInfo>, String> {
 fn main() {
     tauri::Builder::default()
         .manage(GoogleAuthState::default())
+        .manage(TransferControlState::default())
         .invoke_handler(tauri::generate_handler![
             start_download,
             start_drive_upload,
+            pause_transfer,
+            resume_transfer,
+            cancel_transfer,
             test_routes,
             list_network_interfaces,
             connect_google_drive,
