@@ -1,5 +1,6 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 type DownloadResult = {
   output: string;
@@ -42,6 +43,24 @@ type GoogleAuthStatus = {
   expires_in_seconds?: number | null;
 };
 
+type TransferProgress = {
+  transfer_id: string;
+  direction: "download" | "upload" | string;
+  item: string;
+  phase: string;
+  bytes_delta: number;
+  bytes_transferred: number;
+  total_bytes?: number | null;
+  link_name: string;
+  local_ip: string;
+  completed: boolean;
+};
+
+type SpeedWindow = {
+  startedAt: number;
+  bytes: number;
+};
+
 type View = "download" | "upload";
 
 export default function App() {
@@ -65,6 +84,11 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [chunkMiB, setChunkMiB] = useState(8);
 
+  const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
+  const [progressByItem, setProgressByItem] = useState<Record<string, TransferProgress>>({});
+  const [linkSpeeds, setLinkSpeeds] = useState<Record<string, number>>({});
+  const speedWindows = useRef<Record<string, SpeedWindow>>({});
+
   const links = useMemo(
     () => bindIps.split(",").map((ip) => ip.trim()).filter(Boolean),
     [bindIps],
@@ -84,6 +108,78 @@ export default function App() {
     () => new Map(routeTests.map((probe) => [probe.local_ip, probe])),
     [routeTests],
   );
+
+  const activeProgress = useMemo(
+    () =>
+      Object.values(progressByItem)
+        .filter((item) => item.transfer_id === activeTransferId)
+        .sort((a, b) => a.item.localeCompare(b.item)),
+    [progressByItem, activeTransferId],
+  );
+
+  const totalTransferred = useMemo(
+    () => activeProgress.reduce((sum, item) => sum + item.bytes_transferred, 0),
+    [activeProgress],
+  );
+
+  const totalBytes = useMemo(
+    () =>
+      activeProgress.reduce(
+        (sum, item) => sum + (item.total_bytes ?? item.bytes_transferred),
+        0,
+      ),
+    [activeProgress],
+  );
+
+  useEffect(() => {
+    let stop: undefined | (() => void);
+
+    listen<TransferProgress>("transfer-progress", ({ payload }) => {
+      const progressKey = `${payload.transfer_id}:${payload.item}`;
+
+      setProgressByItem((current) => ({
+        ...current,
+        [progressKey]: payload,
+      }));
+
+      const now = Date.now();
+      const key = payload.local_ip;
+      const currentWindow = speedWindows.current[key] ?? {
+        startedAt: now,
+        bytes: 0,
+      };
+
+      currentWindow.bytes += payload.bytes_delta;
+      const elapsed = now - currentWindow.startedAt;
+
+      if (elapsed >= 750 || payload.completed) {
+        const bytesPerSecond =
+          elapsed > 0 ? (currentWindow.bytes * 1000) / elapsed : 0;
+
+        setLinkSpeeds((current) => ({
+          ...current,
+          [key]: bytesPerSecond,
+        }));
+
+        speedWindows.current[key] = {
+          startedAt: now,
+          bytes: 0,
+        };
+      } else {
+        speedWindows.current[key] = currentWindow;
+      }
+    }).then((unlisten) => {
+      stop = unlisten;
+    });
+
+    return () => stop?.();
+  }, []);
+
+  function beginTelemetry(transferId: string) {
+    setActiveTransferId(transferId);
+    setLinkSpeeds({});
+    speedWindows.current = {};
+  }
 
   async function detectNetworks() {
     setNetworkBusy(true);
@@ -189,6 +285,8 @@ export default function App() {
 
   async function submitDownload(event: FormEvent) {
     event.preventDefault();
+    const transferId = crypto.randomUUID();
+    beginTelemetry(transferId);
     setBusy(true);
     setStatus("Iniciando download segmentado…");
 
@@ -198,6 +296,7 @@ export default function App() {
         output,
         connections,
         bindIps: links,
+        transferId,
       });
 
       setStatus(
@@ -212,6 +311,8 @@ export default function App() {
 
   async function submitUpload(event: FormEvent) {
     event.preventDefault();
+    const transferId = crypto.randomUUID();
+    beginTelemetry(transferId);
     setBusy(true);
     setStatus(`Enviando ${files.length} arquivo(s) ao Google Drive…`);
 
@@ -221,6 +322,7 @@ export default function App() {
         parentId: driveParentId || null,
         bindIps: links,
         chunkMib: chunkMiB,
+        transferId,
       });
 
       const routes = [...new Set(result.map((item) => item.link_used))];
@@ -279,17 +381,18 @@ export default function App() {
                   <span>{nic?.name ?? `Ethernet ${index + 1}`}</span>
                   <code>{ip}</code>
                 </div>
-                {(nic?.link_speed || probe?.public_ip || probe?.error) && (
-                  <div className="linkMeta">
-                    {nic?.link_speed && <span>{nic.link_speed}</span>}
-                    {probe?.public_ip && (
-                      <span>
-                        WAN: {probe.public_ip} • {probe.latency_ms ?? "?"} ms
-                      </span>
-                    )}
-                    {probe?.error && <span className="errorText">Sem saída</span>}
-                  </div>
-                )}
+                <div className="linkMeta">
+                  {nic?.link_speed && <span>{nic.link_speed}</span>}
+                  {probe?.public_ip && (
+                    <span>
+                      WAN: {probe.public_ip} • {probe.latency_ms ?? "?"} ms
+                    </span>
+                  )}
+                  {probe?.error && <span className="errorText">Sem saída</span>}
+                  {linkSpeeds[ip] !== undefined && (
+                    <span className="speedText">{formatSpeed(linkSpeeds[ip])}</span>
+                  )}
+                </div>
               </div>
             );
           })}
@@ -487,6 +590,15 @@ export default function App() {
           </form>
         )}
 
+        {activeProgress.length > 0 && (
+          <TransferTelemetry
+            items={activeProgress}
+            totalTransferred={totalTransferred}
+            totalBytes={totalBytes}
+            linkSpeeds={linkSpeeds}
+          />
+        )}
+
         <section className="metrics">
           <article>
             <span>Motor</span>
@@ -494,9 +606,9 @@ export default function App() {
             <small>HTTP + Drive resumable</small>
           </article>
           <article>
-            <span>Rede</span>
-            <strong>Auto-detect</strong>
-            <small>NIC + IP público por rota</small>
+            <span>Telemetria</span>
+            <strong>Tempo real</strong>
+            <small>progresso + velocidade por WAN</small>
           </article>
           <article>
             <span>Cloud</span>
@@ -538,4 +650,98 @@ function RoutePreview({
       })}
     </div>
   );
+}
+
+function TransferTelemetry({
+  items,
+  totalTransferred,
+  totalBytes,
+  linkSpeeds,
+}: {
+  items: TransferProgress[];
+  totalTransferred: number;
+  totalBytes: number;
+  linkSpeeds: Record<string, number>;
+}) {
+  const overallPercent =
+    totalBytes > 0 ? Math.min(100, (totalTransferred / totalBytes) * 100) : 0;
+
+  return (
+    <section className="telemetryPanel">
+      <div className="telemetryHeader">
+        <div>
+          <span>TRANSFERÊNCIA ATIVA</span>
+          <strong>{overallPercent.toFixed(1)}%</strong>
+        </div>
+        <div className="aggregateSpeed">
+          {formatSpeed(Object.values(linkSpeeds).reduce((sum, speed) => sum + speed, 0))}
+        </div>
+      </div>
+
+      <div className="progressTrack">
+        <div className="progressFill" style={{ width: `${overallPercent}%` }} />
+      </div>
+
+      <div className="telemetrySummary">
+        <span>{formatBytes(totalTransferred)} transferidos</span>
+        <span>{totalBytes > 0 ? formatBytes(totalBytes) : "Tamanho desconhecido"}</span>
+      </div>
+
+      <div className="telemetryItems">
+        {items.map((item) => {
+          const percent =
+            item.total_bytes && item.total_bytes > 0
+              ? Math.min(100, (item.bytes_transferred / item.total_bytes) * 100)
+              : 0;
+
+          return (
+            <article key={`${item.transfer_id}:${item.item}`}>
+              <div className="itemTop">
+                <strong title={item.item}>{item.item}</strong>
+                <span>{item.completed ? "Concluído" : `${percent.toFixed(1)}%`}</span>
+              </div>
+              <div className="miniTrack">
+                <div className="miniFill" style={{ width: `${percent}%` }} />
+              </div>
+              <div className="itemMeta">
+                <span>
+                  {item.direction === "upload" ? "Upload" : "Download"} • {item.link_name}
+                </span>
+                <span>
+                  {formatBytes(item.bytes_transferred)}
+                  {item.total_bytes ? ` / ${formatBytes(item.total_bytes)}` : ""}
+                </span>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      <div className="wanTelemetry">
+        {Object.entries(linkSpeeds).map(([ip, speed]) => (
+          <div key={ip}>
+            <span>{ip}</span>
+            <strong>{formatSpeed(speed)}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(
+    units.length - 1,
+    Math.floor(Math.log(value) / Math.log(1024)),
+  );
+  const amount = value / 1024 ** index;
+
+  return `${amount >= 100 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+function formatSpeed(bytesPerSecond: number) {
+  return `${formatBytes(bytesPerSecond)}/s`;
 }
