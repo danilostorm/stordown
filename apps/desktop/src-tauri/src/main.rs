@@ -660,6 +660,280 @@ async fn cancel_transfer(
     })
 }
 
+fn start_browser_capture_server(
+    app: AppHandle,
+    download_dir: PathBuf,
+    queue_state: QueueState,
+    control_state: TransferControlState,
+    store: TransferStore,
+) {
+    tauri::async_runtime::spawn(async move {
+        let listener = match TcpListener::bind("127.0.0.1:17832").await {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = app.emit(
+                    "browser-capture-error",
+                    format!("Falha ao iniciar integração do navegador: {error}"),
+                );
+                return;
+            }
+        };
+
+        loop {
+            let (socket, _) = match listener.accept().await {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            let app = app.clone();
+            let download_dir = download_dir.clone();
+            let queue_state = queue_state.clone();
+            let control_state = control_state.clone();
+            let store = store.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let (reader, mut writer) = socket.into_split();
+                let mut reader = BufReader::new(reader);
+                let mut line = String::new();
+
+                let response = match reader.read_line(&mut line).await {
+                    Ok(0) => BrowserCaptureResponse {
+                        ok: false,
+                        transfer_id: None,
+                        status: None,
+                        error: Some("Mensagem vazia do navegador".to_string()),
+                    },
+                    Ok(_) if line.len() > 64 * 1024 => BrowserCaptureResponse {
+                        ok: false,
+                        transfer_id: None,
+                        status: None,
+                        error: Some("Mensagem do navegador excede 64 KiB".to_string()),
+                    },
+                    Ok(_) => match serde_json::from_str::<BrowserCaptureRequest>(&line) {
+                        Ok(request) => {
+                            handle_browser_capture(
+                                request,
+                                app.clone(),
+                                download_dir,
+                                queue_state,
+                                control_state,
+                                store,
+                            )
+                            .await
+                        }
+                        Err(error) => BrowserCaptureResponse {
+                            ok: false,
+                            transfer_id: None,
+                            status: None,
+                            error: Some(format!("Mensagem inválida do navegador: {error}")),
+                        },
+                    },
+                    Err(error) => BrowserCaptureResponse {
+                        ok: false,
+                        transfer_id: None,
+                        status: None,
+                        error: Some(format!("Falha ao ler mensagem do navegador: {error}")),
+                    },
+                };
+
+                if let Ok(mut bytes) = serde_json::to_vec(&response) {
+                    bytes.push(b'\n');
+                    let _ = writer.write_all(&bytes).await;
+                    let _ = writer.shutdown().await;
+                }
+            });
+        }
+    });
+}
+
+async fn handle_browser_capture(
+    request: BrowserCaptureRequest,
+    app: AppHandle,
+    download_dir: PathBuf,
+    queue_state: QueueState,
+    control_state: TransferControlState,
+    store: TransferStore,
+) -> BrowserCaptureResponse {
+    if request.kind == "ping" {
+        return BrowserCaptureResponse {
+            ok: true,
+            transfer_id: None,
+            status: Some("ready".to_string()),
+            error: None,
+        };
+    }
+
+    if request.kind != "download" {
+        return BrowserCaptureResponse {
+            ok: false,
+            transfer_id: None,
+            status: None,
+            error: Some(format!("Tipo de captura não suportado: {}", request.kind)),
+        };
+    }
+
+    let Some(url) = request.url.filter(|value| !value.trim().is_empty()) else {
+        return BrowserCaptureResponse {
+            ok: false,
+            transfer_id: None,
+            status: None,
+            error: Some("URL ausente".to_string()),
+        };
+    };
+
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return BrowserCaptureResponse {
+            ok: false,
+            transfer_id: None,
+            status: None,
+            error: Some("Somente URLs HTTP/HTTPS podem ser capturadas".to_string()),
+        };
+    }
+
+    let interfaces = match tokio::task::spawn_blocking(discover_windows_interfaces).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            return BrowserCaptureResponse {
+                ok: false,
+                transfer_id: None,
+                status: None,
+                error: Some(error),
+            };
+        }
+        Err(error) => {
+            return BrowserCaptureResponse {
+                ok: false,
+                transfer_id: None,
+                status: None,
+                error: Some(format!("Falha ao detectar interfaces: {error}")),
+            };
+        }
+    };
+
+    let bind_ips: Vec<String> = interfaces.into_iter().map(|item| item.ipv4).collect();
+    if bind_ips.is_empty() {
+        return BrowserCaptureResponse {
+            ok: false,
+            transfer_id: None,
+            status: None,
+            error: Some("Nenhuma interface Ethernet ativa foi detectada".to_string()),
+        };
+    }
+
+    let file_name = browser_capture_filename(&url, request.filename.as_deref());
+    let output = unique_destination(&download_dir, &file_name);
+    let transfer_id = Uuid::new_v4().to_string();
+
+    match enqueue_download_job(
+        url,
+        output.to_string_lossy().to_string(),
+        8,
+        bind_ips,
+        transfer_id.clone(),
+        app.clone(),
+        queue_state,
+        control_state,
+        store,
+    )
+    .await
+    {
+        Ok(_) => {
+            let _ = app.emit(
+                "browser-download-captured",
+                format!(
+                    "{}|{}",
+                    request.source.unwrap_or_else(|| "browser".to_string()),
+                    file_name
+                ),
+            );
+
+            BrowserCaptureResponse {
+                ok: true,
+                transfer_id: Some(transfer_id),
+                status: Some("queued".to_string()),
+                error: None,
+            }
+        }
+        Err(error) => BrowserCaptureResponse {
+            ok: false,
+            transfer_id: None,
+            status: None,
+            error: Some(error),
+        },
+    }
+}
+
+fn browser_capture_filename(url: &str, provided: Option<&str>) -> String {
+    let candidate = provided
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            url.split('?')
+                .next()
+                .unwrap_or(url)
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "download.bin".to_string());
+
+    sanitize_windows_file_name(&candidate)
+}
+
+fn sanitize_windows_file_name(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+
+    let cleaned = cleaned.trim_matches([' ', '.']);
+    if cleaned.is_empty() {
+        "download.bin".to_string()
+    } else {
+        cleaned.chars().take(180).collect()
+    }
+}
+
+fn unique_destination(directory: &Path, file_name: &str) -> PathBuf {
+    let initial = directory.join(file_name);
+    if !initial.exists() {
+        return initial;
+    }
+
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    let extension = path.extension().and_then(|value| value.to_str());
+
+    for index in 1..10_000 {
+        let candidate_name = match extension {
+            Some(extension) if !extension.is_empty() => {
+                format!("{stem} ({index}).{extension}")
+            }
+            _ => format!("{stem} ({index})"),
+        };
+        let candidate = directory.join(candidate_name);
+
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    directory.join(format!("{stem}-{}.bin", Uuid::new_v4()))
+}
+
 #[tauri::command]
 fn pick_download_destination(suggested_name: Option<String>) -> Result<Option<String>, String> {
     let mut dialog = rfd::FileDialog::new();
@@ -773,15 +1047,32 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .map_err(|error| format!("Falha ao localizar AppData do StorDown: {error}"))?;
+            let download_dir = app
+                .path()
+                .download_dir()
+                .unwrap_or_else(|_| app_data.join("Downloads"));
+            std::fs::create_dir_all(&download_dir)?;
+
             let store = TransferStore::open(&app_data.join("stordown.sqlite3"))
                 .map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
+            let queue_state = QueueState::default();
+            let control_state = TransferControlState::default();
 
-            app.manage(store);
+            app.manage(store.clone());
+            app.manage(queue_state.clone());
+            app.manage(control_state.clone());
+            app.manage(GoogleAuthState::default());
+
+            start_browser_capture_server(
+                app.handle().clone(),
+                download_dir,
+                queue_state,
+                control_state,
+                store,
+            );
+
             Ok(())
         })
-        .manage(GoogleAuthState::default())
-        .manage(TransferControlState::default())
-        .manage(QueueState::default())
         .invoke_handler(tauri::generate_handler![
             enqueue_download,
             enqueue_drive_upload,
