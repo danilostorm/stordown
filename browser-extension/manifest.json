@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "StorDown",
+  "version": "0.1.0",
+  "description": "Capture browser downloads and send them to StorDown.",
+  "permissions": [
+    "contextMenus",
+    "downloads",
+    "nativeMessaging",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "StorDown"
+  }
+}
