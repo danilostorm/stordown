@@ -1,0 +1,10 @@
+[package]
+name = "stordown-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+stordown-core = { path = "../../crates/stordown-core" }
+tokio.workspace = true
