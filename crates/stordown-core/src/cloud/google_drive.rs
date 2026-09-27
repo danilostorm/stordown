@@ -1,4 +1,7 @@
-use crate::model::{LinkConfig, ProgressCallback, TransferProgress};
+use crate::{
+    control::TransferControl,
+    model::{LinkConfig, ProgressCallback, TransferProgress},
+};
 use anyhow::{bail, Context, Result};
 use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE},
@@ -98,7 +101,18 @@ pub async fn upload_google_drive_file_with_progress(
     transfer_id: String,
     progress: Option<ProgressCallback>,
 ) -> Result<GoogleDriveUploadResult> {
+    upload_google_drive_file_with_control(request, link, transfer_id, progress, None).await
+}
+
+pub async fn upload_google_drive_file_with_control(
+    request: GoogleDriveUploadRequest,
+    link: LinkConfig,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+) -> Result<GoogleDriveUploadResult> {
     validate_chunk_size(request.chunk_size)?;
+    checkpoint(control.as_ref()).await?;
 
     if !link.enabled {
         bail!("selected link {} is disabled", link.name);
@@ -181,6 +195,7 @@ pub async fn upload_google_drive_file_with_progress(
         &link,
         &transfer_id,
         progress,
+        control,
     )
     .await
 }
@@ -201,7 +216,17 @@ pub async fn upload_google_drive_batch_with_progress(
     transfer_id: String,
     progress: Option<ProgressCallback>,
 ) -> Result<Vec<GoogleDriveUploadResult>> {
+    upload_google_drive_batch_with_control(request, transfer_id, progress, None).await
+}
+
+pub async fn upload_google_drive_batch_with_control(
+    request: GoogleDriveBatchUploadRequest,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+) -> Result<Vec<GoogleDriveUploadResult>> {
     validate_chunk_size(request.chunk_size)?;
+    checkpoint(control.as_ref()).await?;
 
     let enabled_links: Vec<LinkConfig> = request
         .links
@@ -227,9 +252,10 @@ pub async fn upload_google_drive_batch_with_progress(
         let chunk_size = request.chunk_size;
         let transfer_id = transfer_id.clone();
         let progress = progress.clone();
+        let control = control.clone();
 
         jobs.spawn(async move {
-            let result = upload_google_drive_file_with_progress(
+            let result = upload_google_drive_file_with_control(
                 GoogleDriveUploadRequest {
                     source,
                     access_token,
@@ -241,6 +267,7 @@ pub async fn upload_google_drive_batch_with_progress(
                 link,
                 transfer_id,
                 progress,
+                control,
             )
             .await?;
 
@@ -308,12 +335,15 @@ async fn upload_chunks(
     link: &LinkConfig,
     transfer_id: &str,
     progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
 ) -> Result<GoogleDriveUploadResult> {
     let mut file = File::open(source).await?;
     let mut offset = 0u64;
     let mut reported_offset = 0u64;
 
     while offset < total_size {
+        checkpoint(control.as_ref()).await?;
+
         let length = min(chunk_size, total_size - offset);
         file.seek(SeekFrom::Start(offset)).await?;
 
@@ -324,6 +354,7 @@ async fn upload_chunks(
         let mut attempt = 0usize;
 
         loop {
+            checkpoint(control.as_ref()).await?;
             attempt += 1;
 
             let response = client
@@ -482,6 +513,14 @@ async fn query_upload_offset(client: &Client, session_uri: &str, total_size: u64
     }
 
     bail!("unable to query Google Drive upload status: {}", response.status())
+}
+
+async fn checkpoint(control: Option<&TransferControl>) -> Result<()> {
+    if let Some(control) = control {
+        control.checkpoint().await?;
+    }
+
+    Ok(())
 }
 
 fn emit_upload_progress(
