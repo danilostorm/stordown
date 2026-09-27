@@ -462,6 +462,7 @@ async fn enqueue_download_job(
     connections: usize,
     bind_ips: Vec<String>,
     headers: HashMap<String, String>,
+    expected_sha256: Option<String>,
     transfer_id: String,
     scheduled_at: Option<i64>,
     app: AppHandle,
