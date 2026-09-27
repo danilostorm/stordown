@@ -42,6 +42,27 @@ pub struct NewTransferRecord {
     pub bind_ips: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadRule {
+    pub id: i64,
+    pub name: String,
+    pub extensions: Vec<String>,
+    pub destination: String,
+    pub enabled: bool,
+    pub priority: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewDownloadRule {
+    pub name: String,
+    pub extensions: Vec<String>,
+    pub destination: String,
+    pub enabled: bool,
+    pub priority: i64,
+}
+
 impl TransferStore {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
@@ -84,6 +105,20 @@ impl TransferStore {
 
                 CREATE INDEX IF NOT EXISTS idx_transfers_updated
                     ON transfers(updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS download_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    extensions_json TEXT NOT NULL DEFAULT '[]',
+                    destination TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_download_rules_enabled_priority
+                    ON download_rules(enabled, priority ASC, id ASC);
                 "#,
             )
             .map_err(|error| format!("Falha ao preparar banco StorDown: {error}"))?;
@@ -125,6 +160,17 @@ impl TransferStore {
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     error TEXT
+                );
+
+                CREATE TABLE download_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    extensions_json TEXT NOT NULL DEFAULT '[]',
+                    destination TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
                 );
                 "#,
             )
@@ -307,6 +353,163 @@ impl TransferStore {
             )
             .map_err(|error| error.to_string())
     }
+
+    pub async fn list_download_rules(&self) -> Result<Vec<DownloadRule>, String> {
+        let connection = self.connection.lock().await;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, name, extensions_json, destination, enabled, priority, created_at, updated_at
+                 FROM download_rules
+                 ORDER BY priority ASC, id ASC",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = statement
+            .query_map([], row_to_download_rule)
+            .map_err(|error| error.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn upsert_download_rule(
+        &self,
+        id: Option<i64>,
+        rule: NewDownloadRule,
+    ) -> Result<DownloadRule, String> {
+        let now = now_epoch();
+        let extensions = normalize_extensions(rule.extensions);
+        let extensions_json =
+            serde_json::to_string(&extensions).map_err(|error| error.to_string())?;
+        let connection = self.connection.lock().await;
+
+        let rule_id = if let Some(id) = id {
+            connection
+                .execute(
+                    "UPDATE download_rules
+                     SET name = ?2, extensions_json = ?3, destination = ?4,
+                         enabled = ?5, priority = ?6, updated_at = ?7
+                     WHERE id = ?1",
+                    params![
+                        id,
+                        rule.name.trim(),
+                        extensions_json,
+                        rule.destination.trim(),
+                        i64::from(rule.enabled),
+                        rule.priority,
+                        now,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            id
+        } else {
+            connection
+                .execute(
+                    "INSERT INTO download_rules (
+                        name, extensions_json, destination, enabled, priority, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        rule.name.trim(),
+                        extensions_json,
+                        rule.destination.trim(),
+                        i64::from(rule.enabled),
+                        rule.priority,
+                        now,
+                        now,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            connection.last_insert_rowid()
+        };
+
+        drop(connection);
+        self.get_download_rule(rule_id)
+            .await?
+            .ok_or_else(|| "Regra recém-salva não encontrada".to_string())
+    }
+
+    pub async fn delete_download_rule(&self, id: i64) -> Result<(), String> {
+        let connection = self.connection.lock().await;
+        connection
+            .execute("DELETE FROM download_rules WHERE id = ?1", params![id])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub async fn get_download_rule(&self, id: i64) -> Result<Option<DownloadRule>, String> {
+        let connection = self.connection.lock().await;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, name, extensions_json, destination, enabled, priority, created_at, updated_at
+                 FROM download_rules
+                 WHERE id = ?1",
+            )
+            .map_err(|error| error.to_string())?;
+
+        statement
+            .query_row(params![id], row_to_download_rule)
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn match_download_rule(
+        &self,
+        file_name: &str,
+    ) -> Result<Option<DownloadRule>, String> {
+        let extension = Path::new(file_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase());
+
+        let Some(extension) = extension else {
+            return Ok(None);
+        };
+
+        let rules = self.list_download_rules().await?;
+        Ok(rules.into_iter().find(|rule| {
+            rule.enabled
+                && rule
+                    .extensions
+                    .iter()
+                    .any(|candidate| candidate == "*" || candidate == &extension)
+        }))
+    }
+}
+
+fn row_to_download_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRule> {
+    let extensions_json: String = row.get(2)?;
+    let extensions =
+        serde_json::from_str::<Vec<String>>(&extensions_json).unwrap_or_default();
+    let enabled: i64 = row.get(4)?;
+
+    Ok(DownloadRule {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        extensions,
+        destination: row.get(3)?,
+        enabled: enabled != 0,
+        priority: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn normalize_extensions(values: Vec<String>) -> Vec<String> {
+    let mut normalized = values
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(|ch| ch == ',' || ch == ';' || ch == ' ')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.trim_start_matches('.').to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRecord> {
@@ -349,6 +552,34 @@ fn now_epoch() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{NewTransferRecord, TransferStore};
+
+    #[tokio::test]
+    async fn stores_download_rules_and_matches_extension() {
+        let store = TransferStore::memory().unwrap();
+
+        let rule = store
+            .upsert_download_rule(
+                None,
+                super::NewDownloadRule {
+                    name: "Vídeos".to_string(),
+                    extensions: vec!["mkv, mp4".to_string()],
+                    destination: "C:\\Downloads\\Vídeos".to_string(),
+                    enabled: true,
+                    priority: 10,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rule.extensions, vec!["mkv", "mp4"]);
+
+        let matched = store
+            .match_download_rule("filme.MKV")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(matched.name, "Vídeos");
+    }
 
     #[tokio::test]
     async fn stores_and_updates_transfer_history() {
