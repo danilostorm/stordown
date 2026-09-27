@@ -1,4 +1,5 @@
 use crate::{
+    adaptive::AdaptiveLinkPool,
     control::TransferControl,
     model::{LinkConfig, ProgressCallback, TransferProgress},
 };
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     cmp::min,
+    collections::{BTreeSet, VecDeque},
     net::IpAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -111,12 +113,29 @@ pub async fn upload_google_drive_file_with_control(
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
 ) -> Result<GoogleDriveUploadResult> {
-    validate_chunk_size(request.chunk_size)?;
-    checkpoint(control.as_ref()).await?;
-
     if !link.enabled {
         bail!("selected link {} is disabled", link.name);
     }
+
+    upload_google_drive_file_with_pool(
+        request,
+        AdaptiveLinkPool::new(vec![link]),
+        transfer_id,
+        progress,
+        control,
+    )
+    .await
+}
+
+async fn upload_google_drive_file_with_pool(
+    request: GoogleDriveUploadRequest,
+    pool: AdaptiveLinkPool,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+) -> Result<GoogleDriveUploadResult> {
+    validate_chunk_size(request.chunk_size)?;
+    checkpoint(control.as_ref()).await?;
 
     let metadata = tokio::fs::metadata(&request.source)
         .await
@@ -136,6 +155,17 @@ pub async fn upload_google_drive_file_with_control(
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
+    let (session_uri, session_link) = create_resumable_session_with_failover(
+        &pool,
+        &request.access_token,
+        request.parent_id.as_deref(),
+        &remote_name,
+        &mime_type,
+        total_size,
+        control.as_ref(),
+    )
+    .await?;
+
     emit_upload_progress(
         progress.as_ref(),
         &transfer_id,
@@ -144,55 +174,30 @@ pub async fn upload_google_drive_file_with_control(
         0,
         0,
         total_size,
-        &link,
+        &session_link,
         false,
     );
 
-    let client = drive_client(link.local_ip)?;
-    let session_uri = create_resumable_session(
-        &client,
-        &request.access_token,
-        request.parent_id.as_deref(),
-        &remote_name,
-        &mime_type,
-        total_size,
-    )
-    .await?;
-
     if total_size == 0 {
-        let response = client
-            .put(&session_uri)
-            .header(CONTENT_LENGTH, "0")
-            .header(CONTENT_RANGE, "bytes */0")
-            .send()
-            .await?;
-        let response = response.error_for_status()?;
-        let file: DriveFileResponse = response.json().await?;
-
-        emit_upload_progress(
-            progress.as_ref(),
-            &transfer_id,
+        return upload_empty_file(
+            &pool,
+            &session_uri,
             &remote_name,
-            "completed",
-            0,
-            0,
-            0,
-            &link,
-            true,
-        );
-
-        return Ok(to_result(file, 0, &link));
+            &transfer_id,
+            progress,
+            control,
+        )
+        .await;
     }
 
-    upload_chunks(
-        &client,
+    upload_chunks_adaptive(
+        &pool,
         &session_uri,
         &request.source,
         &remote_name,
         &mime_type,
         total_size,
         request.chunk_size,
-        &link,
         &transfer_id,
         progress,
         control,
@@ -242,47 +247,88 @@ pub async fn upload_google_drive_batch_with_control(
         return Ok(Vec::new());
     }
 
-    let weighted_links = expand_weighted_links(&enabled_links);
-    let mut jobs = JoinSet::new();
+    let max_parallel = enabled_links.len().saturating_mul(2).clamp(1, 8);
+    let pool = AdaptiveLinkPool::new(enabled_links);
+    let mut pending: VecDeque<(usize, PathBuf)> =
+        request.files.into_iter().enumerate().collect();
+    let mut jobs: JoinSet<Result<(usize, GoogleDriveUploadResult)>> = JoinSet::new();
 
-    for (index, source) in request.files.into_iter().enumerate() {
-        let link = weighted_links[index % weighted_links.len()].clone();
-        let access_token = request.access_token.clone();
-        let parent_id = request.parent_id.clone();
-        let chunk_size = request.chunk_size;
-        let transfer_id = transfer_id.clone();
-        let progress = progress.clone();
-        let control = control.clone();
+    while jobs.len() < max_parallel {
+        let Some((index, source)) = pending.pop_front() else {
+            break;
+        };
 
-        jobs.spawn(async move {
-            let result = upload_google_drive_file_with_control(
-                GoogleDriveUploadRequest {
-                    source,
-                    access_token,
-                    parent_id,
-                    remote_name: None,
-                    mime_type: None,
-                    chunk_size,
-                },
-                link,
-                transfer_id,
-                progress,
-                control,
-            )
-            .await?;
-
-            Ok::<_, anyhow::Error>((index, result))
-        });
+        spawn_drive_upload_job(
+            &mut jobs,
+            index,
+            source,
+            request.access_token.clone(),
+            request.parent_id.clone(),
+            request.chunk_size,
+            transfer_id.clone(),
+            progress.clone(),
+            control.clone(),
+            pool.clone(),
+        );
     }
 
     let mut results = Vec::new();
 
     while let Some(joined) = jobs.join_next().await {
         results.push(joined??);
+
+        if let Some((index, source)) = pending.pop_front() {
+            spawn_drive_upload_job(
+                &mut jobs,
+                index,
+                source,
+                request.access_token.clone(),
+                request.parent_id.clone(),
+                request.chunk_size,
+                transfer_id.clone(),
+                progress.clone(),
+                control.clone(),
+                pool.clone(),
+            );
+        }
     }
 
     results.sort_by_key(|(index, _)| *index);
     Ok(results.into_iter().map(|(_, result)| result).collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_drive_upload_job(
+    jobs: &mut JoinSet<Result<(usize, GoogleDriveUploadResult)>>,
+    index: usize,
+    source: PathBuf,
+    access_token: String,
+    parent_id: Option<String>,
+    chunk_size: u64,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+    pool: AdaptiveLinkPool,
+) {
+    jobs.spawn(async move {
+        let result = upload_google_drive_file_with_pool(
+            GoogleDriveUploadRequest {
+                source,
+                access_token,
+                parent_id,
+                remote_name: None,
+                mime_type: None,
+                chunk_size,
+            },
+            pool,
+            transfer_id,
+            progress,
+            control,
+        )
+        .await?;
+
+        Ok::<_, anyhow::Error>((index, result))
+    });
 }
 
 async fn create_resumable_session(
