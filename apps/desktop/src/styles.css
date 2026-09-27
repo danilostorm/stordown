@@ -7,7 +7,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 1000px; min-height: 100vh; }
-button, input { font: inherit; }
+button, input, textarea, select { font: inherit; }
 
 .shell {
   min-height: 100vh;
@@ -69,11 +69,14 @@ h1 { margin: 0; font-size: 32px; letter-spacing: -.03em; }
   display: grid; gap: 18px;
 }
 label { display: grid; gap: 8px; color: #aab3c5; font-size: 12px; font-weight: 700; }
-input {
+input, textarea, select {
   width: 100%; border: 1px solid #293247; border-radius: 11px;
   background: #0c111c; color: white; padding: 13px 14px; outline: none;
 }
-input:focus { border-color: #6173ff; box-shadow: 0 0 0 3px rgba(97,115,255,.12); }
+textarea { resize: vertical; min-height: 116px; line-height: 1.45; }
+input:focus, textarea:focus, select:focus {
+  border-color: #6173ff; box-shadow: 0 0 0 3px rgba(97,115,255,.12);
+}
 .grid2 { display: grid; grid-template-columns: 180px 1fr; gap: 16px; }
 
 .routePreview { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
@@ -92,3 +95,16 @@ input:focus { border-color: #6173ff; box-shadow: 0 0 0 3px rgba(97,115,255,.12);
 .metrics article { padding: 16px; border: 1px solid #1d2535; border-radius: 14px; background: #0c111b; }
 .metrics span, .metrics small { display: block; color: #7f8aa2; font-size: 11px; }
 .metrics strong { display: block; font-size: 18px; margin: 5px 0; }
+
+.uploadGrid { grid-template-columns: 180px 1fr; }
+
+.notice {
+  display: grid;
+  gap: 6px;
+  padding: 14px 15px;
+  border-radius: 12px;
+  border: 1px solid #2d3850;
+  background: #111827;
+}
+.notice strong { font-size: 13px; }
+.notice span { color: #8f9ab1; font-size: 12px; line-height: 1.5; }
