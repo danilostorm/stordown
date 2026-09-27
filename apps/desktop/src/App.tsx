@@ -2,23 +2,6 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-type DownloadResult = {
-  output: string;
-  bytes_written: number;
-  segments: number;
-  links_used: string[];
-};
-
-type DriveUploadResult = {
-  id: string;
-  name: string;
-  size: number;
-  web_view_link?: string | null;
-  bytes_uploaded: number;
-  link_used: string;
-  local_ip: string;
-};
-
 type NetworkInterfaceInfo = {
   name: string;
   description: string;
@@ -56,12 +39,32 @@ type TransferProgress = {
   completed: boolean;
 };
 
+type TransferRecord = {
+  id: string;
+  direction: "download" | "upload" | string;
+  name: string;
+  source: string;
+  destination: string;
+  provider: string;
+  status: string;
+  bytes_transferred: number;
+  total_bytes?: number | null;
+  connections: number;
+  bind_ips: string[];
+  created_at: number;
+  updated_at: number;
+  error?: string | null;
+};
+
 type SpeedWindow = {
   startedAt: number;
   bytes: number;
 };
 
-type View = "download" | "upload";
+type View = "download" | "upload" | "queue" | "finished";
+
+const activeStatuses = new Set(["queued", "running", "paused", "interrupted"]);
+const finishedStatuses = new Set(["completed", "failed", "cancelled"]);
 
 export default function App() {
   const [view, setView] = useState<View>("download");
@@ -85,9 +88,9 @@ export default function App() {
   const [chunkMiB, setChunkMiB] = useState(8);
 
   const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
-  const [transferPaused, setTransferPaused] = useState(false);
   const [progressByItem, setProgressByItem] = useState<Record<string, TransferProgress>>({});
   const [linkSpeeds, setLinkSpeeds] = useState<Record<string, number>>({});
+  const [records, setRecords] = useState<TransferRecord[]>([]);
   const speedWindows = useRef<Record<string, SpeedWindow>>({});
 
   const links = useMemo(
@@ -110,6 +113,11 @@ export default function App() {
     [routeTests],
   );
 
+  const selectedRecord = useMemo(
+    () => records.find((record) => record.id === activeTransferId) ?? null,
+    [records, activeTransferId],
+  );
+
   const activeProgress = useMemo(
     () =>
       Object.values(progressByItem)
@@ -118,22 +126,49 @@ export default function App() {
     [progressByItem, activeTransferId],
   );
 
-  const totalTransferred = useMemo(
-    () => activeProgress.reduce((sum, item) => sum + item.bytes_transferred, 0),
-    [activeProgress],
-  );
+  const totalTransferred = useMemo(() => {
+    if (activeProgress.length > 0) {
+      return activeProgress.reduce((sum, item) => sum + item.bytes_transferred, 0);
+    }
 
-  const totalBytes = useMemo(
-    () =>
-      activeProgress.reduce(
+    return selectedRecord?.bytes_transferred ?? 0;
+  }, [activeProgress, selectedRecord]);
+
+  const totalBytes = useMemo(() => {
+    if (activeProgress.length > 0) {
+      return activeProgress.reduce(
         (sum, item) => sum + (item.total_bytes ?? item.bytes_transferred),
         0,
-      ),
-    [activeProgress],
+      );
+    }
+
+    return selectedRecord?.total_bytes ?? selectedRecord?.bytes_transferred ?? 0;
+  }, [activeProgress, selectedRecord]);
+
+  const queuedRecords = useMemo(
+    () => records.filter((record) => activeStatuses.has(record.status)),
+    [records],
   );
 
+  const finishedRecords = useMemo(
+    () => records.filter((record) => finishedStatuses.has(record.status)),
+    [records],
+  );
+
+  async function reloadTransfers() {
+    try {
+      const items = await invoke<TransferRecord[]>("list_transfers", { limit: 300 });
+      setRecords(items);
+    } catch (error) {
+      setStatus(`Erro ao carregar fila: ${String(error)}`);
+    }
+  }
+
   useEffect(() => {
-    let stop: undefined | (() => void);
+    reloadTransfers();
+
+    let stopProgress: undefined | (() => void);
+    let stopList: undefined | (() => void);
 
     listen<TransferProgress>("transfer-progress", ({ payload }) => {
       const progressKey = `${payload.transfer_id}:${payload.item}`;
@@ -147,10 +182,7 @@ export default function App() {
             ? { ...payload, bytes_transferred: previous.bytes_transferred }
             : payload;
 
-        return {
-          ...current,
-          [progressKey]: next,
-        };
+        return { ...current, [progressKey]: next };
       });
 
       const now = Date.now();
@@ -164,74 +196,27 @@ export default function App() {
       const elapsed = now - currentWindow.startedAt;
 
       if (elapsed >= 750 || payload.completed) {
-        const bytesPerSecond =
-          elapsed > 0 ? (currentWindow.bytes * 1000) / elapsed : 0;
-
-        setLinkSpeeds((current) => ({
-          ...current,
-          [key]: bytesPerSecond,
-        }));
-
-        speedWindows.current[key] = {
-          startedAt: now,
-          bytes: 0,
-        };
+        const bytesPerSecond = elapsed > 0 ? (currentWindow.bytes * 1000) / elapsed : 0;
+        setLinkSpeeds((current) => ({ ...current, [key]: bytesPerSecond }));
+        speedWindows.current[key] = { startedAt: now, bytes: 0 };
       } else {
         speedWindows.current[key] = currentWindow;
       }
     }).then((unlisten) => {
-      stop = unlisten;
+      stopProgress = unlisten;
     });
 
-    return () => stop?.();
+    listen<string>("transfer-list-changed", () => {
+      reloadTransfers();
+    }).then((unlisten) => {
+      stopList = unlisten;
+    });
+
+    return () => {
+      stopProgress?.();
+      stopList?.();
+    };
   }, []);
-
-  function beginTelemetry(transferId: string) {
-    setActiveTransferId(transferId);
-    setTransferPaused(false);
-    setLinkSpeeds({});
-    speedWindows.current = {};
-  }
-
-  async function pauseActiveTransfer() {
-    if (!activeTransferId) return;
-
-    try {
-      await invoke("pause_transfer", { transferId: activeTransferId });
-      setTransferPaused(true);
-      setLinkSpeeds({});
-      speedWindows.current = {};
-      setStatus("Transferência pausada");
-    } catch (error) {
-      setStatus(`Erro ao pausar: ${String(error)}`);
-    }
-  }
-
-  async function resumeActiveTransfer() {
-    if (!activeTransferId) return;
-
-    try {
-      await invoke("resume_transfer", { transferId: activeTransferId });
-      setTransferPaused(false);
-      setStatus("Transferência retomada");
-    } catch (error) {
-      setStatus(`Erro ao retomar: ${String(error)}`);
-    }
-  }
-
-  async function cancelActiveTransfer() {
-    if (!activeTransferId) return;
-
-    try {
-      await invoke("cancel_transfer", { transferId: activeTransferId });
-      setTransferPaused(false);
-      setLinkSpeeds({});
-      speedWindows.current = {};
-      setStatus("Cancelamento solicitado…");
-    } catch (error) {
-      setStatus(`Erro ao cancelar: ${String(error)}`);
-    }
-  }
 
   async function detectNetworks() {
     setNetworkBusy(true);
@@ -262,9 +247,7 @@ export default function App() {
     setStatus("Testando a saída de Internet de cada interface…");
 
     try {
-      const probes = await invoke<LinkProbeStatus[]>("test_routes", {
-        bindIps: links,
-      });
+      const probes = await invoke<LinkProbeStatus[]>("test_routes", { bindIps: links });
       setRouteTests(probes);
 
       const publicIps = new Set(
@@ -338,12 +321,11 @@ export default function App() {
   async function submitDownload(event: FormEvent) {
     event.preventDefault();
     const transferId = crypto.randomUUID();
-    beginTelemetry(transferId);
     setBusy(true);
-    setStatus("Iniciando download segmentado…");
+    setStatus("Adicionando download à fila…");
 
     try {
-      const result = await invoke<DownloadResult>("start_download", {
+      const record = await invoke<TransferRecord>("enqueue_download", {
         url,
         output,
         connections,
@@ -351,18 +333,14 @@ export default function App() {
         transferId,
       });
 
-      setStatus(
-        `Concluído: ${result.segments} segmentos • ${result.links_used.join(" + ")}`,
-      );
+      setActiveTransferId(record.id);
+      setLinkSpeeds({});
+      speedWindows.current = {};
+      await reloadTransfers();
+      setStatus("Download adicionado à fila");
     } catch (error) {
-      const message = String(error);
-      setStatus(
-        message.toLowerCase().includes("transfer cancelled")
-          ? "Download cancelado. As partes ficam salvas para retomada."
-          : `Erro: ${message}`,
-      );
+      setStatus(`Erro: ${String(error)}`);
     } finally {
-      setTransferPaused(false);
       setBusy(false);
     }
   }
@@ -370,12 +348,11 @@ export default function App() {
   async function submitUpload(event: FormEvent) {
     event.preventDefault();
     const transferId = crypto.randomUUID();
-    beginTelemetry(transferId);
     setBusy(true);
-    setStatus(`Enviando ${files.length} arquivo(s) ao Google Drive…`);
+    setStatus(`Adicionando ${files.length} arquivo(s) à fila…`);
 
     try {
-      const result = await invoke<DriveUploadResult[]>("start_drive_upload", {
+      const record = await invoke<TransferRecord>("enqueue_drive_upload", {
         files,
         parentId: driveParentId || null,
         bindIps: links,
@@ -383,20 +360,65 @@ export default function App() {
         transferId,
       });
 
-      const routes = [...new Set(result.map((item) => item.link_used))];
-      setStatus(
-        `Upload concluído: ${result.length} arquivo(s) • ${routes.join(" + ")}`,
-      );
+      setActiveTransferId(record.id);
+      setLinkSpeeds({});
+      speedWindows.current = {};
+      await reloadTransfers();
+      setStatus("Upload adicionado à fila");
     } catch (error) {
-      const message = String(error);
-      setStatus(
-        message.toLowerCase().includes("transfer cancelled")
-          ? "Upload cancelado."
-          : `Erro: ${message}`,
-      );
+      setStatus(`Erro: ${String(error)}`);
     } finally {
-      setTransferPaused(false);
       setBusy(false);
+    }
+  }
+
+  async function pauseTransfer(transferId: string) {
+    try {
+      await invoke("pause_transfer", { transferId });
+      setStatus("Transferência pausada");
+      await reloadTransfers();
+    } catch (error) {
+      setStatus(`Erro ao pausar: ${String(error)}`);
+    }
+  }
+
+  async function resumeTransfer(transferId: string) {
+    try {
+      await invoke("resume_transfer", { transferId });
+      setStatus("Transferência retomada");
+      await reloadTransfers();
+    } catch (error) {
+      setStatus(`Erro ao retomar: ${String(error)}`);
+    }
+  }
+
+  async function cancelTransfer(transferId: string) {
+    try {
+      await invoke("cancel_transfer", { transferId });
+      setStatus("Cancelamento solicitado");
+      await reloadTransfers();
+    } catch (error) {
+      setStatus(`Erro ao cancelar: ${String(error)}`);
+    }
+  }
+
+  async function deleteHistory(transferId: string) {
+    try {
+      await invoke("delete_transfer_history", { transferId });
+      if (activeTransferId === transferId) setActiveTransferId(null);
+      await reloadTransfers();
+    } catch (error) {
+      setStatus(`Erro ao remover histórico: ${String(error)}`);
+    }
+  }
+
+  async function clearFinished() {
+    try {
+      const removed = await invoke<number>("clear_finished_history");
+      await reloadTransfers();
+      setStatus(`${removed} item(ns) removido(s) do histórico`);
+    } catch (error) {
+      setStatus(`Erro ao limpar histórico: ${String(error)}`);
     }
   }
 
@@ -424,10 +446,23 @@ export default function App() {
           >
             Uploads
           </button>
-          <button className="navItem">Finalizados</button>
-          <button className="navItem">Cloud</button>
-          <button className="navItem">Agendador</button>
-          <button className="navItem">Configurações</button>
+          <button
+            className={`navItem navCount ${view === "queue" ? "active" : ""}`}
+            onClick={() => setView("queue")}
+          >
+            <span>Fila</span>
+            <b>{queuedRecords.length}</b>
+          </button>
+          <button
+            className={`navItem navCount ${view === "finished" ? "active" : ""}`}
+            onClick={() => setView("finished")}
+          >
+            <span>Finalizados</span>
+            <b>{finishedRecords.length}</b>
+          </button>
+          <button className="navItem" disabled>Cloud</button>
+          <button className="navItem" disabled>Agendador</button>
+          <button className="navItem" disabled>Configurações</button>
         </nav>
 
         <div className="networkCard">
@@ -480,17 +515,13 @@ export default function App() {
         <header>
           <div>
             <p className="eyebrow">STORDOWN V0.2 DEV</p>
-            <h1>{view === "download" ? "Novo download" : "Upload para Google Drive"}</h1>
-            <p className="subtitle">
-              {view === "download"
-                ? "Segmentação HTTP Range com saída por múltiplas interfaces de rede."
-                : "Upload retomável em blocos, com distribuição de vários arquivos entre as WANs."}
-            </p>
+            <h1>{viewTitle(view)}</h1>
+            <p className="subtitle">{viewSubtitle(view)}</p>
           </div>
           <div className="statusPill">{status}</div>
         </header>
 
-        {view === "download" ? (
+        {view === "download" && (
           <form className="downloadCard" onSubmit={submitDownload}>
             <label>
               URL
@@ -504,11 +535,7 @@ export default function App() {
 
             <label>
               Salvar em
-              <input
-                value={output}
-                onChange={(e) => setOutput(e.target.value)}
-                required
-              />
+              <input value={output} onChange={(e) => setOutput(e.target.value)} required />
             </label>
 
             <div className="grid2">
@@ -539,17 +566,18 @@ export default function App() {
             <RoutePreview links={links} nics={nicByIp} probes={probeByIp} />
 
             <button className="primary" disabled={busy || links.length === 0}>
-              {busy ? "Transferindo…" : "Iniciar com Multi-Link"}
+              {busy ? "Adicionando…" : "Adicionar à fila"}
             </button>
           </form>
-        ) : (
+        )}
+
+        {view === "upload" && (
           <form className="downloadCard" onSubmit={submitUpload}>
             <div className="notice">
-              <strong>Google Drive + duas WANs</strong>
+              <strong>Google Drive + fila Multi-WAN</strong>
               <span>
-                Vários arquivos são enviados em paralelo por links diferentes. Um único arquivo
-                usa uma sessão retomável sequencial; o modo Relay para somar duas WANs em um único
-                arquivo será uma etapa separada.
+                Você pode adicionar vários lotes. O StorDown executa até duas transferências da
+                fila simultaneamente e mantém o histórico no SQLite local.
               </span>
             </div>
 
@@ -567,10 +595,7 @@ export default function App() {
             <div className="grid2 uploadGrid">
               <label>
                 Bloco
-                <select
-                  value={chunkMiB}
-                  onChange={(e) => setChunkMiB(Number(e.target.value))}
-                >
+                <select value={chunkMiB} onChange={(e) => setChunkMiB(Number(e.target.value))}>
                   <option value={1}>1 MiB</option>
                   <option value={4}>4 MiB</option>
                   <option value={8}>8 MiB</option>
@@ -649,40 +674,73 @@ export default function App() {
               className="primary"
               disabled={busy || links.length === 0 || files.length === 0 || !driveAuth.connected}
             >
-              {busy ? "Enviando…" : `Enviar ${files.length} arquivo(s)`}
+              {busy ? "Adicionando…" : `Adicionar ${files.length} arquivo(s) à fila`}
             </button>
           </form>
         )}
 
-        {activeProgress.length > 0 && (
+        {view === "queue" && (
+          <TransferList
+            records={queuedRecords}
+            emptyText="A fila está vazia."
+            selectedId={activeTransferId}
+            onSelect={setActiveTransferId}
+            onPause={pauseTransfer}
+            onResume={resumeTransfer}
+            onCancel={cancelTransfer}
+            onDelete={deleteHistory}
+          />
+        )}
+
+        {view === "finished" && (
+          <>
+            <div className="listToolbar">
+              <span>{finishedRecords.length} registro(s)</span>
+              <button type="button" onClick={clearFinished} disabled={finishedRecords.length === 0}>
+                Limpar finalizados
+              </button>
+            </div>
+            <TransferList
+              records={finishedRecords}
+              emptyText="Ainda não há transferências finalizadas."
+              selectedId={activeTransferId}
+              onSelect={setActiveTransferId}
+              onPause={pauseTransfer}
+              onResume={resumeTransfer}
+              onCancel={cancelTransfer}
+              onDelete={deleteHistory}
+            />
+          </>
+        )}
+
+        {selectedRecord && (activeProgress.length > 0 || activeStatuses.has(selectedRecord.status)) && (
           <TransferTelemetry
+            record={selectedRecord}
             items={activeProgress}
             totalTransferred={totalTransferred}
             totalBytes={totalBytes}
             linkSpeeds={linkSpeeds}
-            paused={transferPaused}
-            canControl={busy && activeProgress.some((item) => !item.completed)}
-            onPause={pauseActiveTransfer}
-            onResume={resumeActiveTransfer}
-            onCancel={cancelActiveTransfer}
+            onPause={() => pauseTransfer(selectedRecord.id)}
+            onResume={() => resumeTransfer(selectedRecord.id)}
+            onCancel={() => cancelTransfer(selectedRecord.id)}
           />
         )}
 
         <section className="metrics">
           <article>
-            <span>Motor</span>
-            <strong>Rust</strong>
-            <small>HTTP + Drive resumable</small>
+            <span>Fila</span>
+            <strong>{queuedRecords.length}</strong>
+            <small>download + upload unificados</small>
           </article>
           <article>
-            <span>Telemetria</span>
-            <strong>Tempo real</strong>
-            <small>progresso + velocidade por WAN</small>
+            <span>Execução</span>
+            <strong>2 simultâneas</strong>
+            <small>com Multi-WAN e telemetria</small>
           </article>
           <article>
-            <span>Cloud</span>
-            <strong>Google Drive</strong>
-            <small>download + upload</small>
+            <span>Histórico</span>
+            <strong>{finishedRecords.length}</strong>
+            <small>persistente em SQLite</small>
           </article>
         </section>
       </section>
@@ -721,23 +779,122 @@ function RoutePreview({
   );
 }
 
+function TransferList({
+  records,
+  emptyText,
+  selectedId,
+  onSelect,
+  onPause,
+  onResume,
+  onCancel,
+  onDelete,
+}: {
+  records: TransferRecord[];
+  emptyText: string;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onPause: (id: string) => void;
+  onResume: (id: string) => void;
+  onCancel: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  if (records.length === 0) {
+    return <div className="emptyState">{emptyText}</div>;
+  }
+
+  return (
+    <section className="transferList">
+      {records.map((record) => {
+        const percent =
+          record.total_bytes && record.total_bytes > 0
+            ? Math.min(100, (record.bytes_transferred / record.total_bytes) * 100)
+            : 0;
+
+        return (
+          <article
+            key={record.id}
+            className={`transferRow ${selectedId === record.id ? "selected" : ""}`}
+            onClick={() => onSelect(record.id)}
+          >
+            <div className="transferKind">
+              <span>{record.direction === "upload" ? "↑" : "↓"}</span>
+            </div>
+
+            <div className="transferMain">
+              <div className="transferTitle">
+                <strong title={record.name}>{record.name}</strong>
+                <StatusBadge status={record.status} />
+              </div>
+
+              <div className="miniTrack">
+                <div className="miniFill" style={{ width: `${percent}%` }} />
+              </div>
+
+              <div className="transferMeta">
+                <span>{record.provider === "google_drive" ? "Google Drive" : "HTTP/HTTPS"}</span>
+                <span>
+                  {formatBytes(record.bytes_transferred)}
+                  {record.total_bytes ? ` / ${formatBytes(record.total_bytes)}` : ""}
+                </span>
+                <span>{record.bind_ips.length} link(s)</span>
+                <span>{formatDate(record.updated_at)}</span>
+              </div>
+
+              {record.error && <div className="rowError">{record.error}</div>}
+            </div>
+
+            <div className="rowActions" onClick={(event) => event.stopPropagation()}>
+              {record.status === "running" && (
+                <button type="button" onClick={() => onPause(record.id)}>Pausar</button>
+              )}
+              {record.status === "paused" && (
+                <button type="button" onClick={() => onResume(record.id)}>Retomar</button>
+              )}
+              {(record.status === "running" || record.status === "paused" || record.status === "queued") && (
+                <button type="button" className="dangerButton" onClick={() => onCancel(record.id)}>
+                  Cancelar
+                </button>
+              )}
+              {finishedStatuses.has(record.status) && (
+                <button type="button" onClick={() => onDelete(record.id)}>Remover</button>
+              )}
+            </div>
+          </article>
+        );
+      })}
+    </section>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const label: Record<string, string> = {
+    queued: "Na fila",
+    running: "Transferindo",
+    paused: "Pausado",
+    interrupted: "Interrompido",
+    completed: "Concluído",
+    failed: "Falhou",
+    cancelled: "Cancelado",
+  };
+
+  return <span className={`statusBadge status-${status}`}>{label[status] ?? status}</span>;
+}
+
 function TransferTelemetry({
+  record,
   items,
   totalTransferred,
   totalBytes,
   linkSpeeds,
-  paused,
-  canControl,
   onPause,
   onResume,
   onCancel,
 }: {
+  record: TransferRecord;
   items: TransferProgress[];
   totalTransferred: number;
   totalBytes: number;
   linkSpeeds: Record<string, number>;
-  paused: boolean;
-  canControl: boolean;
   onPause: () => void;
   onResume: () => void;
   onCancel: () => void;
@@ -749,26 +906,25 @@ function TransferTelemetry({
     <section className="telemetryPanel">
       <div className="telemetryHeader">
         <div>
-          <span>TRANSFERÊNCIA ATIVA</span>
+          <span>TRANSFERÊNCIA SELECIONADA</span>
           <strong>{overallPercent.toFixed(1)}%</strong>
         </div>
+
         <div className="telemetryActions">
           <div className="aggregateSpeed">
-            {paused
+            {record.status === "paused"
               ? "Pausado"
               : formatSpeed(Object.values(linkSpeeds).reduce((sum, speed) => sum + speed, 0))}
           </div>
-          {canControl && (
-            <>
-              {paused ? (
-                <button type="button" onClick={onResume}>Retomar</button>
-              ) : (
-                <button type="button" onClick={onPause}>Pausar</button>
-              )}
-              <button type="button" className="dangerButton" onClick={onCancel}>
-                Cancelar
-              </button>
-            </>
+
+          {record.status === "running" && (
+            <button type="button" onClick={onPause}>Pausar</button>
+          )}
+          {record.status === "paused" && (
+            <button type="button" onClick={onResume}>Retomar</button>
+          )}
+          {(record.status === "running" || record.status === "paused" || record.status === "queued") && (
+            <button type="button" className="dangerButton" onClick={onCancel}>Cancelar</button>
           )}
         </div>
       </div>
@@ -782,41 +938,43 @@ function TransferTelemetry({
         <span>{totalBytes > 0 ? formatBytes(totalBytes) : "Tamanho desconhecido"}</span>
       </div>
 
-      <div className="telemetryItems">
-        {items.map((item) => {
-          const percent =
-            item.total_bytes && item.total_bytes > 0
-              ? Math.min(100, (item.bytes_transferred / item.total_bytes) * 100)
-              : 0;
+      {items.length > 0 && (
+        <div className="telemetryItems">
+          {items.map((item) => {
+            const percent =
+              item.total_bytes && item.total_bytes > 0
+                ? Math.min(100, (item.bytes_transferred / item.total_bytes) * 100)
+                : 0;
 
-          return (
-            <article key={`${item.transfer_id}:${item.item}`}>
-              <div className="itemTop">
-                <strong title={item.item}>{item.item}</strong>
-                <span>{item.completed ? "Concluído" : `${percent.toFixed(1)}%`}</span>
-              </div>
-              <div className="miniTrack">
-                <div className="miniFill" style={{ width: `${percent}%` }} />
-              </div>
-              <div className="itemMeta">
-                <span>
-                  {item.direction === "upload" ? "Upload" : "Download"} • {item.link_name}
-                </span>
-                <span>
-                  {formatBytes(item.bytes_transferred)}
-                  {item.total_bytes ? ` / ${formatBytes(item.total_bytes)}` : ""}
-                </span>
-              </div>
-            </article>
-          );
-        })}
-      </div>
+            return (
+              <article key={`${item.transfer_id}:${item.item}`}>
+                <div className="itemTop">
+                  <strong title={item.item}>{item.item}</strong>
+                  <span>{item.completed ? "Concluído" : `${percent.toFixed(1)}%`}</span>
+                </div>
+                <div className="miniTrack">
+                  <div className="miniFill" style={{ width: `${percent}%` }} />
+                </div>
+                <div className="itemMeta">
+                  <span>
+                    {item.direction === "upload" ? "Upload" : "Download"} • {item.link_name}
+                  </span>
+                  <span>
+                    {formatBytes(item.bytes_transferred)}
+                    {item.total_bytes ? ` / ${formatBytes(item.total_bytes)}` : ""}
+                  </span>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
 
       <div className="wanTelemetry">
-        {Object.entries(linkSpeeds).map(([ip, speed]) => (
+        {record.bind_ips.map((ip) => (
           <div key={ip}>
             <span>{ip}</span>
-            <strong>{formatSpeed(speed)}</strong>
+            <strong>{formatSpeed(linkSpeeds[ip] ?? 0)}</strong>
           </div>
         ))}
       </div>
@@ -824,14 +982,31 @@ function TransferTelemetry({
   );
 }
 
+function viewTitle(view: View) {
+  if (view === "download") return "Novo download";
+  if (view === "upload") return "Upload para Google Drive";
+  if (view === "queue") return "Fila de transferências";
+  return "Histórico";
+}
+
+function viewSubtitle(view: View) {
+  if (view === "download") {
+    return "Adicione downloads HTTP/HTTPS segmentados à fila Multi-WAN.";
+  }
+  if (view === "upload") {
+    return "Adicione lotes de upload do Google Drive à mesma fila do StorDown.";
+  }
+  if (view === "queue") {
+    return "Downloads e uploads em uma fila única, com até duas transferências simultâneas.";
+  }
+  return "Transferências concluídas, canceladas e com falha ficam salvas entre reinicializações.";
+}
+
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return "0 B";
 
   const units = ["B", "KB", "MB", "GB", "TB"];
-  const index = Math.min(
-    units.length - 1,
-    Math.floor(Math.log(value) / Math.log(1024)),
-  );
+  const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
   const amount = value / 1024 ** index;
 
   return `${amount >= 100 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
@@ -839,4 +1014,14 @@ function formatBytes(value: number) {
 
 function formatSpeed(bytesPerSecond: number) {
   return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function formatDate(epochSeconds: number) {
+  if (!epochSeconds) return "—";
+  return new Date(epochSeconds * 1000).toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
