@@ -18,6 +18,23 @@ type DriveUploadResult = {
   local_ip: string;
 };
 
+type NetworkInterfaceInfo = {
+  name: string;
+  description: string;
+  ipv4: string;
+  gateway?: string | null;
+  link_speed?: string | null;
+  index: number;
+};
+
+type LinkProbeStatus = {
+  name: string;
+  local_ip: string;
+  public_ip?: string | null;
+  latency_ms?: number | null;
+  error?: string | null;
+};
+
 type View = "download" | "upload";
 
 export default function App() {
@@ -28,6 +45,9 @@ export default function App() {
   const [bindIps, setBindIps] = useState("192.168.30.101, 192.168.30.102");
   const [status, setStatus] = useState("Pronto");
   const [busy, setBusy] = useState(false);
+  const [networkBusy, setNetworkBusy] = useState(false);
+  const [detectedNics, setDetectedNics] = useState<NetworkInterfaceInfo[]>([]);
+  const [routeTests, setRouteTests] = useState<LinkProbeStatus[]>([]);
 
   const [uploadFiles, setUploadFiles] = useState(
     "C:\\Uploads\\arquivo1.mkv\nC:\\Uploads\\arquivo2.mkv",
@@ -45,6 +65,68 @@ export default function App() {
     () => uploadFiles.split(/\r?\n/).map((path) => path.trim()).filter(Boolean),
     [uploadFiles],
   );
+
+  const nicByIp = useMemo(
+    () => new Map(detectedNics.map((nic) => [nic.ipv4, nic])),
+    [detectedNics],
+  );
+
+  const probeByIp = useMemo(
+    () => new Map(routeTests.map((probe) => [probe.local_ip, probe])),
+    [routeTests],
+  );
+
+  async function detectNetworks() {
+    setNetworkBusy(true);
+    setStatus("Detectando placas de rede físicas do Windows…");
+
+    try {
+      const nics = await invoke<NetworkInterfaceInfo[]>("list_network_interfaces");
+      setDetectedNics(nics);
+      setRouteTests([]);
+
+      if (nics.length > 0) {
+        setBindIps(nics.map((nic) => nic.ipv4).join(", "));
+        setStatus(`${nics.length} interface(s) física(s) detectada(s)`);
+      } else {
+        setStatus("Nenhuma interface física ativa com IPv4 foi encontrada");
+      }
+    } catch (error) {
+      setStatus(`Erro ao detectar interfaces: ${String(error)}`);
+    } finally {
+      setNetworkBusy(false);
+    }
+  }
+
+  async function testRoutes() {
+    if (links.length === 0) return;
+
+    setNetworkBusy(true);
+    setStatus("Testando a saída de Internet de cada interface…");
+
+    try {
+      const probes = await invoke<LinkProbeStatus[]>("test_routes", {
+        bindIps: links,
+      });
+      setRouteTests(probes);
+
+      const publicIps = new Set(
+        probes.map((probe) => probe.public_ip).filter((ip): ip is string => Boolean(ip)),
+      );
+
+      if (publicIps.size >= 2) {
+        setStatus("Multi-WAN confirmado: as interfaces estão saindo por IPs públicos diferentes");
+      } else if (probes.some((probe) => probe.error)) {
+        setStatus("Teste concluído com falha em uma ou mais interfaces");
+      } else {
+        setStatus("As interfaces responderam, mas estão usando o mesmo IP público");
+      }
+    } catch (error) {
+      setStatus(`Erro no teste Multi-WAN: ${String(error)}`);
+    } finally {
+      setNetworkBusy(false);
+    }
+  }
 
   async function submitDownload(event: FormEvent) {
     event.preventDefault();
@@ -127,20 +209,52 @@ export default function App() {
         <div className="networkCard">
           <span>Multi-Link</span>
           <strong>{links.length} links configurados</strong>
-          {links.map((ip, index) => (
-            <div className="linkRow" key={ip}>
-              <i />
-              <span>Ethernet {index + 1}</span>
-              <code>{ip}</code>
-            </div>
-          ))}
+
+          {links.map((ip, index) => {
+            const nic = nicByIp.get(ip);
+            const probe = probeByIp.get(ip);
+
+            return (
+              <div className="networkLink" key={ip}>
+                <div className="linkRow">
+                  <i className={probe?.error ? "bad" : ""} />
+                  <span>{nic?.name ?? `Ethernet ${index + 1}`}</span>
+                  <code>{ip}</code>
+                </div>
+                {(nic?.link_speed || probe?.public_ip || probe?.error) && (
+                  <div className="linkMeta">
+                    {nic?.link_speed && <span>{nic.link_speed}</span>}
+                    {probe?.public_ip && (
+                      <span>
+                        WAN: {probe.public_ip} • {probe.latency_ms ?? "?"} ms
+                      </span>
+                    )}
+                    {probe?.error && <span className="errorText">Sem saída</span>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          <div className="networkActions">
+            <button type="button" onClick={detectNetworks} disabled={networkBusy}>
+              Detectar placas
+            </button>
+            <button
+              type="button"
+              onClick={testRoutes}
+              disabled={networkBusy || links.length === 0}
+            >
+              Testar WANs
+            </button>
+          </div>
         </div>
       </aside>
 
       <section className="content">
         <header>
           <div>
-            <p className="eyebrow">STORDOWN V0.1</p>
+            <p className="eyebrow">STORDOWN V0.2 DEV</p>
             <h1>{view === "download" ? "Novo download" : "Upload para Google Drive"}</h1>
             <p className="subtitle">
               {view === "download"
@@ -188,13 +302,16 @@ export default function App() {
                 IPs das interfaces
                 <input
                   value={bindIps}
-                  onChange={(e) => setBindIps(e.target.value)}
-                  placeholder="192.168.30.101, 192.168.30.102"
+                  onChange={(e) => {
+                    setBindIps(e.target.value);
+                    setRouteTests([]);
+                  }}
+                  placeholder="Use Detectar placas ou informe os IPs"
                 />
               </label>
             </div>
 
-            <RoutePreview links={links} />
+            <RoutePreview links={links} nics={nicByIp} probes={probeByIp} />
 
             <button className="primary" disabled={busy || links.length === 0}>
               {busy ? "Transferindo…" : "Iniciar com Multi-Link"}
@@ -262,12 +379,15 @@ export default function App() {
               IPs das interfaces
               <input
                 value={bindIps}
-                onChange={(e) => setBindIps(e.target.value)}
-                placeholder="192.168.30.101, 192.168.30.102"
+                onChange={(e) => {
+                  setBindIps(e.target.value);
+                  setRouteTests([]);
+                }}
+                placeholder="Use Detectar placas ou informe os IPs"
               />
             </label>
 
-            <RoutePreview links={links} />
+            <RoutePreview links={links} nics={nicByIp} probes={probeByIp} />
 
             <button
               className="primary"
@@ -285,9 +405,9 @@ export default function App() {
             <small>HTTP + Drive resumable</small>
           </article>
           <article>
-            <span>Estratégia</span>
-            <strong>Multi-NIC</strong>
-            <small>bind por IP local</small>
+            <span>Rede</span>
+            <strong>Auto-detect</strong>
+            <small>NIC + IP público por rota</small>
           </article>
           <article>
             <span>Cloud</span>
@@ -300,16 +420,33 @@ export default function App() {
   );
 }
 
-function RoutePreview({ links }: { links: string[] }) {
+function RoutePreview({
+  links,
+  nics,
+  probes,
+}: {
+  links: string[];
+  nics: Map<string, NetworkInterfaceInfo>;
+  probes: Map<string, LinkProbeStatus>;
+}) {
   return (
     <div className="routePreview">
-      {links.map((ip, index) => (
-        <div key={ip}>
-          <span>Link {index + 1}</span>
-          <strong>{ip}</strong>
-          <small>→ regra UDM → WAN {index + 1}</small>
-        </div>
-      ))}
+      {links.map((ip, index) => {
+        const nic = nics.get(ip);
+        const probe = probes.get(ip);
+
+        return (
+          <div key={ip}>
+            <span>{nic?.name ?? `Link ${index + 1}`}</span>
+            <strong>{ip}</strong>
+            <small>
+              {probe?.public_ip
+                ? `WAN ${index + 1}: ${probe.public_ip} • ${probe.latency_ms ?? "?"} ms`
+                : `→ regra UDM → WAN ${index + 1}`}
+            </small>
+          </div>
+        );
+      })}
     </div>
   );
 }
