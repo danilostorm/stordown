@@ -318,6 +318,32 @@ export default function App() {
     }
   }
 
+  async function chooseDownloadDestination() {
+    try {
+      const picked = await invoke<string | null>("pick_download_destination", {
+        suggestedName: suggestedDownloadName(url),
+      });
+      if (picked) {
+        setOutput(picked);
+        setStatus("Destino selecionado");
+      }
+    } catch (error) {
+      setStatus(`Erro ao abrir seletor do Windows: ${String(error)}`);
+    }
+  }
+
+  async function chooseUploadFiles() {
+    try {
+      const picked = await invoke<string[]>("pick_upload_files");
+      if (picked.length > 0) {
+        setUploadFiles(picked.join("\n"));
+        setStatus(`${picked.length} arquivo(s) selecionado(s)`);
+      }
+    } catch (error) {
+      setStatus(`Erro ao abrir seletor do Windows: ${String(error)}`);
+    }
+  }
+
   async function submitDownload(event: FormEvent) {
     event.preventDefault();
     const transferId = crypto.randomUUID();
@@ -535,7 +561,12 @@ export default function App() {
 
             <label>
               Salvar em
-              <input value={output} onChange={(e) => setOutput(e.target.value)} required />
+              <div className="fieldWithButton">
+                <input value={output} onChange={(e) => setOutput(e.target.value)} required />
+                <button type="button" onClick={chooseDownloadDestination}>
+                  Procurar…
+                </button>
+              </div>
             </label>
 
             <div className="grid2">
@@ -583,13 +614,18 @@ export default function App() {
 
             <label>
               Arquivos locais — um caminho por linha
-              <textarea
-                rows={5}
-                value={uploadFiles}
-                onChange={(e) => setUploadFiles(e.target.value)}
-                placeholder={"C:\\Uploads\\filme1.mkv\nC:\\Uploads\\filme2.mkv"}
-                required
-              />
+              <div className="uploadPicker">
+                <textarea
+                  rows={5}
+                  value={uploadFiles}
+                  onChange={(e) => setUploadFiles(e.target.value)}
+                  placeholder={"C:\\Uploads\\filme1.mkv\nC:\\Uploads\\filme2.mkv"}
+                  required
+                />
+                <button type="button" onClick={chooseUploadFiles}>
+                  Selecionar arquivos…
+                </button>
+              </div>
             </label>
 
             <div className="grid2 uploadGrid">
@@ -1000,6 +1036,16 @@ function viewSubtitle(view: View) {
     return "Downloads e uploads em uma fila única, com até duas transferências simultâneas.";
   }
   return "Transferências concluídas, canceladas e com falha ficam salvas entre reinicializações.";
+}
+
+function suggestedDownloadName(url: string) {
+  try {
+    const parsed = new URL(url);
+    const last = parsed.pathname.split("/").filter(Boolean).pop();
+    return last ? decodeURIComponent(last) : "download.bin";
+  } catch {
+    return "download.bin";
+  }
 }
 
 function formatBytes(value: number) {
