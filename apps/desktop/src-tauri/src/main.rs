@@ -1,11 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::IpAddr, path::PathBuf, process::Command};
-use stordown_core::{
-    download, probe_links, upload_google_drive_batch, DownloadRequest, DownloadResult,
-    GoogleDriveBatchUploadRequest, GoogleDriveUploadResult, LinkConfig, LinkProbeStatus,
+use std::{
+    collections::HashMap,
+    env,
+    net::IpAddr,
+    path::PathBuf,
+    process::Command,
+    time::{Duration, Instant},
 };
+use stordown_core::{
+    authorize_google_drive_desktop, download, probe_links, refresh_google_access_token,
+    upload_google_drive_batch, DownloadRequest, DownloadResult, GoogleDriveBatchUploadRequest,
+    GoogleDriveUploadResult, LinkConfig, LinkProbeStatus,
+};
+use tauri::State;
+use tokio::sync::Mutex;
+
+const GOOGLE_KEYRING_SERVICE: &str = "StorDown Google Drive";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NetworkInterfaceInfo {
@@ -15,6 +27,28 @@ struct NetworkInterfaceInfo {
     gateway: Option<String>,
     link_speed: Option<String>,
     index: u32,
+}
+
+#[derive(Debug, Clone)]
+struct GoogleSession {
+    client_id: String,
+    access_token: String,
+    refresh_token: String,
+    scope: Option<String>,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct GoogleAuthState {
+    session: Mutex<Option<GoogleSession>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GoogleAuthStatus {
+    connected: bool,
+    client_id: Option<String>,
+    scope: Option<String>,
+    expires_in_seconds: Option<u64>,
 }
 
 fn parse_links(bind_ips: Vec<String>) -> Result<Vec<LinkConfig>, String> {
@@ -40,6 +74,167 @@ fn parse_links(bind_ips: Vec<String>) -> Result<Vec<LinkConfig>, String> {
         .collect()
 }
 
+fn resolve_google_client_id(input: Option<String>) -> Result<String, String> {
+    if let Some(value) = input.filter(|value| !value.trim().is_empty()) {
+        return Ok(value.trim().to_string());
+    }
+
+    env::var("STORDOWN_GOOGLE_CLIENT_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "Google OAuth Client ID não configurado. Defina STORDOWN_GOOGLE_CLIENT_ID ou informe o Client ID na tela de desenvolvimento."
+                .to_string()
+        })
+}
+
+fn credential_entry(client_id: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(GOOGLE_KEYRING_SERVICE, client_id)
+        .map_err(|error| format!("Falha ao acessar o armazenamento seguro do Windows: {error}"))
+}
+
+fn auth_status(session: Option<&GoogleSession>) -> GoogleAuthStatus {
+    match session {
+        Some(session) => GoogleAuthStatus {
+            connected: true,
+            client_id: Some(session.client_id.clone()),
+            scope: session.scope.clone(),
+            expires_in_seconds: Some(
+                session
+                    .expires_at
+                    .saturating_duration_since(Instant::now())
+                    .as_secs(),
+            ),
+        },
+        None => GoogleAuthStatus {
+            connected: false,
+            client_id: None,
+            scope: None,
+            expires_in_seconds: None,
+        },
+    }
+}
+
+#[tauri::command]
+async fn connect_google_drive(
+    client_id: Option<String>,
+    state: State<'_, GoogleAuthState>,
+) -> Result<GoogleAuthStatus, String> {
+    let client_id = resolve_google_client_id(client_id)?;
+    let tokens = authorize_google_drive_desktop(&client_id)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let refresh_token = match tokens.refresh_token {
+        Some(token) => {
+            credential_entry(&client_id)?
+                .set_password(&token)
+                .map_err(|error| format!("Falha ao salvar credencial Google com segurança: {error}"))?;
+            token
+        }
+        None => credential_entry(&client_id)?
+            .get_password()
+            .map_err(|_| {
+                "O Google não retornou refresh token e não existe uma credencial salva. Tente conectar novamente."
+                    .to_string()
+            })?,
+    };
+
+    let session = GoogleSession {
+        client_id,
+        access_token: tokens.access_token,
+        refresh_token,
+        scope: tokens.scope,
+        expires_at: Instant::now() + Duration::from_secs(tokens.expires_in.saturating_sub(30)),
+    };
+
+    let status = auth_status(Some(&session));
+    *state.session.lock().await = Some(session);
+    Ok(status)
+}
+
+#[tauri::command]
+async fn restore_google_drive(
+    client_id: Option<String>,
+    state: State<'_, GoogleAuthState>,
+) -> Result<GoogleAuthStatus, String> {
+    let client_id = resolve_google_client_id(client_id)?;
+    let refresh_token = credential_entry(&client_id)?
+        .get_password()
+        .map_err(|_| "Nenhuma sessão Google Drive salva neste Windows".to_string())?;
+
+    let tokens = refresh_google_access_token(&client_id, &refresh_token)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let session = GoogleSession {
+        client_id,
+        access_token: tokens.access_token,
+        refresh_token,
+        scope: tokens.scope,
+        expires_at: Instant::now() + Duration::from_secs(tokens.expires_in.saturating_sub(30)),
+    };
+
+    let status = auth_status(Some(&session));
+    *state.session.lock().await = Some(session);
+    Ok(status)
+}
+
+#[tauri::command]
+async fn google_drive_auth_status(
+    state: State<'_, GoogleAuthState>,
+) -> Result<GoogleAuthStatus, String> {
+    let guard = state.session.lock().await;
+    Ok(auth_status(guard.as_ref()))
+}
+
+#[tauri::command]
+async fn disconnect_google_drive(
+    client_id: Option<String>,
+    state: State<'_, GoogleAuthState>,
+) -> Result<GoogleAuthStatus, String> {
+    let client_id = {
+        let guard = state.session.lock().await;
+        guard
+            .as_ref()
+            .map(|session| session.client_id.clone())
+            .or_else(|| client_id.filter(|value| !value.trim().is_empty()))
+            .or_else(|| env::var("STORDOWN_GOOGLE_CLIENT_ID").ok())
+    };
+
+    *state.session.lock().await = None;
+
+    if let Some(client_id) = client_id {
+        if let Ok(entry) = credential_entry(&client_id) {
+            let _ = entry.delete_credential();
+        }
+    }
+
+    Ok(auth_status(None))
+}
+
+async fn current_google_access_token(state: &GoogleAuthState) -> Result<String, String> {
+    let mut guard = state.session.lock().await;
+    let session = guard
+        .as_mut()
+        .ok_or_else(|| "Conecte sua conta Google Drive antes de iniciar o upload".to_string())?;
+
+    if Instant::now() < session.expires_at {
+        return Ok(session.access_token.clone());
+    }
+
+    let tokens = refresh_google_access_token(&session.client_id, &session.refresh_token)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    session.access_token = tokens.access_token;
+    session.scope = tokens.scope.or_else(|| session.scope.clone());
+    session.expires_at =
+        Instant::now() + Duration::from_secs(tokens.expires_in.saturating_sub(30));
+
+    Ok(session.access_token.clone())
+}
+
 #[tauri::command]
 async fn start_download(
     url: String,
@@ -63,18 +258,16 @@ async fn start_download(
 #[tauri::command]
 async fn start_drive_upload(
     files: Vec<String>,
-    access_token: String,
     parent_id: Option<String>,
     bind_ips: Vec<String>,
     chunk_mib: u64,
+    state: State<'_, GoogleAuthState>,
 ) -> Result<Vec<GoogleDriveUploadResult>, String> {
     if files.is_empty() {
         return Err("Adicione pelo menos um arquivo para upload".to_string());
     }
 
-    if access_token.trim().is_empty() {
-        return Err("Token Google Drive ausente".to_string());
-    }
+    let access_token = current_google_access_token(state.inner()).await?;
 
     let chunk_size = chunk_mib
         .checked_mul(1024 * 1024)
@@ -159,11 +352,16 @@ fn discover_windows_interfaces() -> Result<Vec<NetworkInterfaceInfo>, String> {
 
 fn main() {
     tauri::Builder::default()
+        .manage(GoogleAuthState::default())
         .invoke_handler(tauri::generate_handler![
             start_download,
             start_drive_upload,
             test_routes,
-            list_network_interfaces
+            list_network_interfaces,
+            connect_google_drive,
+            restore_google_drive,
+            google_drive_auth_status,
+            disconnect_google_drive
         ])
         .run(tauri::generate_context!())
         .expect("error while running StorDown");
