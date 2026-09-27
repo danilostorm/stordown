@@ -48,6 +48,8 @@ struct BrowserCaptureRequest {
     url: Option<String>,
     filename: Option<String>,
     source: Option<String>,
+    #[serde(default)]
+    headers: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -353,6 +355,7 @@ fn spawn_download_execution(
     output: String,
     connections: usize,
     bind_ips: Vec<String>,
+    headers: HashMap<String, String>,
     transfer_id: String,
     scheduled_at: Option<i64>,
     app: AppHandle,
@@ -407,7 +410,7 @@ fn spawn_download_execution(
                 output: PathBuf::from(output),
                 connections,
                 links,
-                headers: HashMap::new(),
+                headers,
             },
             transfer_id.clone(),
             Some(progress_emitter(app.clone(), store.clone())),
@@ -444,6 +447,7 @@ async fn enqueue_download_job(
     output: String,
     connections: usize,
     bind_ips: Vec<String>,
+    headers: HashMap<String, String>,
     transfer_id: String,
     scheduled_at: Option<i64>,
     app: AppHandle,
@@ -476,6 +480,7 @@ async fn enqueue_download_job(
         output,
         connections,
         bind_ips,
+        headers,
         transfer_id,
         normalized_schedule,
         app,
@@ -505,6 +510,7 @@ async fn enqueue_download(
         output,
         connections,
         bind_ips,
+        HashMap::new(),
         transfer_id,
         scheduled_at,
         app,
@@ -911,11 +917,14 @@ async fn handle_browser_capture(
     let output = unique_destination(&destination_dir, &file_name);
     let transfer_id = Uuid::new_v4().to_string();
 
+    let auth_headers = sanitize_browser_headers(request.headers);
+
     match enqueue_download_job(
         url,
         output.to_string_lossy().to_string(),
         8,
         bind_ips,
+        auth_headers,
         transfer_id.clone(),
         None,
         app.clone(),
@@ -949,6 +958,30 @@ async fn handle_browser_capture(
             error: Some(error),
         },
     }
+}
+
+fn sanitize_browser_headers(
+    headers: Option<HashMap<String, String>>,
+) -> HashMap<String, String> {
+    const ALLOWED: [&str; 4] = ["cookie", "referer", "origin", "user-agent"];
+
+    headers
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let normalized = name.trim().to_ascii_lowercase();
+            let safe_name = ALLOWED.iter().any(|allowed| *allowed == normalized);
+            let safe_value = !value.contains('\r')
+                && !value.contains('\n')
+                && value.len() <= 64 * 1024;
+
+            if safe_name && safe_value {
+                Some((normalized, value))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn browser_capture_filename(url: &str, provided: Option<&str>) -> String {
@@ -1230,6 +1263,7 @@ fn main() {
                             record.destination,
                             record.connections,
                             record.bind_ips,
+                            HashMap::new(),
                             record.id,
                             record.scheduled_at,
                             restore_app.clone(),
