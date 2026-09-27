@@ -26,11 +26,11 @@
 - [x] Categories and destination rules for browser-captured downloads
 - [x] Persistent SQLite history
 - [x] Persistent HTTP download scheduler
-- [ ] Speed limits
+- [x] Per-transfer aggregate speed limits
 - [x] Pause / resume / cancel controls for active transfers
 - [x] Smart adaptive balancing for segmented HTTP downloads
 - [x] Automatic HTTP segment failover when one link disappears
-- [ ] File integrity verification
+- [x] Optional SHA256 download integrity verification
 - [x] Windows file picker integration
 
 ## V0.3 - Browser integration
