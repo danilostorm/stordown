@@ -54,7 +54,7 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
 chrome.downloads.onCreated.addListener(async (item) => {
   const { autoCapture = false } = await chrome.storage.local.get("autoCapture");
 
-  if (!autoCapture || !item.url) {
+  if (!autoCapture || !item.url || !/^https?:\/\//i.test(item.url)) {
     return;
   }
 
