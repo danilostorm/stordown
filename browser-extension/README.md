@@ -7,10 +7,12 @@ Chrome/Edge Manifest V3 integration for sending browser downloads to the StorDow
 - **Baixar com StorDown** in link context menus.
 - Popup with desktop connection test.
 - Optional automatic capture for direct HTTP/HTTPS browser downloads.
+- Optional **Sites autenticados** mode that asks for cookie/site access only when the user enables it.
+- Cookie, Referer and browser User-Agent handoff for captured authenticated downloads.
 - Native Messaging bridge through `cloud.hoststorm.stordown`.
 - Browser download is cancelled only after the StorDown desktop confirms the transfer was accepted into its queue.
 
-Automatic capture is currently marked **beta** because authenticated downloads still need controlled cookie/header handoff.
+Authenticated capture is opt-in. The extension does not request cookie/site access unless **Sites autenticados** is enabled. Captured authentication headers are forwarded in memory and are not written into StorDown's SQLite history.
 
 ## Development install
 
@@ -52,9 +54,20 @@ Persistent queue -> Multi-WAN engine
 
 The desktop capture listener binds only to loopback. It automatically uses the active physical Windows NIC IPv4 addresses and saves captured browser downloads in the user's Downloads folder with collision-safe filenames.
 
+## Authenticated capture
+
+When **Sites autenticados** is enabled from the extension popup, Chrome/Edge prompts for the optional `cookies` permission and HTTP/HTTPS site access. The permission can be removed again by turning the option off.
+
+For a captured URL, the extension may send:
+
+- `Cookie` from the browser cookie jar for that URL;
+- `Referer` when the browser exposes one;
+- the browser `User-Agent`.
+
+The desktop side accepts only a small header whitelist and size limits. These headers are passed directly to the in-memory HTTP transfer request and are **not persisted** in SQLite.
+
 ## Next browser milestone
 
-- secure cookie/header handoff for authenticated downloads;
 - per-site capture rules and exclusions;
 - packaged extension/native-host installer;
 - download-all-links support.
