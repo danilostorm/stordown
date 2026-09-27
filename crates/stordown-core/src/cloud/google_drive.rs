@@ -1,4 +1,5 @@
 use crate::{
+    adaptive::AdaptiveLinkPool,
     control::TransferControl,
     model::{LinkConfig, ProgressCallback, TransferProgress},
 };
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     cmp::min,
+    collections::{BTreeSet, VecDeque},
     net::IpAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -111,12 +113,29 @@ pub async fn upload_google_drive_file_with_control(
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
 ) -> Result<GoogleDriveUploadResult> {
-    validate_chunk_size(request.chunk_size)?;
-    checkpoint(control.as_ref()).await?;
-
     if !link.enabled {
         bail!("selected link {} is disabled", link.name);
     }
+
+    upload_google_drive_file_with_pool(
+        request,
+        AdaptiveLinkPool::new(vec![link]),
+        transfer_id,
+        progress,
+        control,
+    )
+    .await
+}
+
+async fn upload_google_drive_file_with_pool(
+    request: GoogleDriveUploadRequest,
+    pool: AdaptiveLinkPool,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+) -> Result<GoogleDriveUploadResult> {
+    validate_chunk_size(request.chunk_size)?;
+    checkpoint(control.as_ref()).await?;
 
     let metadata = tokio::fs::metadata(&request.source)
         .await
@@ -136,6 +155,17 @@ pub async fn upload_google_drive_file_with_control(
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
+    let (session_uri, session_link) = create_resumable_session_with_failover(
+        &pool,
+        &request.access_token,
+        request.parent_id.as_deref(),
+        &remote_name,
+        &mime_type,
+        total_size,
+        control.as_ref(),
+    )
+    .await?;
+
     emit_upload_progress(
         progress.as_ref(),
         &transfer_id,
@@ -144,55 +174,30 @@ pub async fn upload_google_drive_file_with_control(
         0,
         0,
         total_size,
-        &link,
+        &session_link,
         false,
     );
 
-    let client = drive_client(link.local_ip)?;
-    let session_uri = create_resumable_session(
-        &client,
-        &request.access_token,
-        request.parent_id.as_deref(),
-        &remote_name,
-        &mime_type,
-        total_size,
-    )
-    .await?;
-
     if total_size == 0 {
-        let response = client
-            .put(&session_uri)
-            .header(CONTENT_LENGTH, "0")
-            .header(CONTENT_RANGE, "bytes */0")
-            .send()
-            .await?;
-        let response = response.error_for_status()?;
-        let file: DriveFileResponse = response.json().await?;
-
-        emit_upload_progress(
-            progress.as_ref(),
-            &transfer_id,
+        return upload_empty_file(
+            &pool,
+            &session_uri,
             &remote_name,
-            "completed",
-            0,
-            0,
-            0,
-            &link,
-            true,
-        );
-
-        return Ok(to_result(file, 0, &link));
+            &transfer_id,
+            progress,
+            control,
+        )
+        .await;
     }
 
-    upload_chunks(
-        &client,
+    upload_chunks_adaptive(
+        &pool,
         &session_uri,
         &request.source,
         &remote_name,
         &mime_type,
         total_size,
         request.chunk_size,
-        &link,
         &transfer_id,
         progress,
         control,
@@ -242,47 +247,88 @@ pub async fn upload_google_drive_batch_with_control(
         return Ok(Vec::new());
     }
 
-    let weighted_links = expand_weighted_links(&enabled_links);
-    let mut jobs = JoinSet::new();
+    let max_parallel = enabled_links.len().saturating_mul(2).clamp(1, 8);
+    let pool = AdaptiveLinkPool::new(enabled_links);
+    let mut pending: VecDeque<(usize, PathBuf)> =
+        request.files.into_iter().enumerate().collect();
+    let mut jobs: JoinSet<Result<(usize, GoogleDriveUploadResult)>> = JoinSet::new();
 
-    for (index, source) in request.files.into_iter().enumerate() {
-        let link = weighted_links[index % weighted_links.len()].clone();
-        let access_token = request.access_token.clone();
-        let parent_id = request.parent_id.clone();
-        let chunk_size = request.chunk_size;
-        let transfer_id = transfer_id.clone();
-        let progress = progress.clone();
-        let control = control.clone();
+    while jobs.len() < max_parallel {
+        let Some((index, source)) = pending.pop_front() else {
+            break;
+        };
 
-        jobs.spawn(async move {
-            let result = upload_google_drive_file_with_control(
-                GoogleDriveUploadRequest {
-                    source,
-                    access_token,
-                    parent_id,
-                    remote_name: None,
-                    mime_type: None,
-                    chunk_size,
-                },
-                link,
-                transfer_id,
-                progress,
-                control,
-            )
-            .await?;
-
-            Ok::<_, anyhow::Error>((index, result))
-        });
+        spawn_drive_upload_job(
+            &mut jobs,
+            index,
+            source,
+            request.access_token.clone(),
+            request.parent_id.clone(),
+            request.chunk_size,
+            transfer_id.clone(),
+            progress.clone(),
+            control.clone(),
+            pool.clone(),
+        );
     }
 
     let mut results = Vec::new();
 
     while let Some(joined) = jobs.join_next().await {
         results.push(joined??);
+
+        if let Some((index, source)) = pending.pop_front() {
+            spawn_drive_upload_job(
+                &mut jobs,
+                index,
+                source,
+                request.access_token.clone(),
+                request.parent_id.clone(),
+                request.chunk_size,
+                transfer_id.clone(),
+                progress.clone(),
+                control.clone(),
+                pool.clone(),
+            );
+        }
     }
 
     results.sort_by_key(|(index, _)| *index);
     Ok(results.into_iter().map(|(_, result)| result).collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_drive_upload_job(
+    jobs: &mut JoinSet<Result<(usize, GoogleDriveUploadResult)>>,
+    index: usize,
+    source: PathBuf,
+    access_token: String,
+    parent_id: Option<String>,
+    chunk_size: u64,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+    pool: AdaptiveLinkPool,
+) {
+    jobs.spawn(async move {
+        let result = upload_google_drive_file_with_pool(
+            GoogleDriveUploadRequest {
+                source,
+                access_token,
+                parent_id,
+                remote_name: None,
+                mime_type: None,
+                chunk_size,
+            },
+            pool,
+            transfer_id,
+            progress,
+            control,
+        )
+        .await?;
+
+        Ok::<_, anyhow::Error>((index, result))
+    });
 }
 
 async fn create_resumable_session(
@@ -324,15 +370,141 @@ async fn create_resumable_session(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn upload_chunks(
-    client: &Client,
+async fn create_resumable_session_with_failover(
+    pool: &AdaptiveLinkPool,
+    access_token: &str,
+    parent_id: Option<&str>,
+    remote_name: &str,
+    mime_type: &str,
+    total_size: u64,
+    control: Option<&TransferControl>,
+) -> Result<(String, LinkConfig)> {
+    let mut last_error = None;
+
+    for attempt in 1..=MAX_CHUNK_RETRIES {
+        checkpoint(control).await?;
+        let lease = pool.acquire().await;
+        let link = lease.link.clone();
+
+        let client = match drive_client(link.local_ip) {
+            Ok(client) => client,
+            Err(error) => {
+                pool.failure(&lease).await;
+                last_error = Some(error);
+                if attempt < MAX_CHUNK_RETRIES {
+                    sleep(backoff(attempt)).await;
+                }
+                continue;
+            }
+        };
+
+        match create_resumable_session(
+            &client,
+            access_token,
+            parent_id,
+            remote_name,
+            mime_type,
+            total_size,
+        )
+        .await
+        {
+            Ok(session_uri) => {
+                pool.release(&lease).await;
+                return Ok((session_uri, link));
+            }
+            Err(error) => {
+                pool.failure(&lease).await;
+                last_error = Some(error);
+                if attempt < MAX_CHUNK_RETRIES {
+                    sleep(backoff(attempt)).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("unable to create Drive upload session")))
+}
+
+async fn upload_empty_file(
+    pool: &AdaptiveLinkPool,
+    session_uri: &str,
+    remote_name: &str,
+    transfer_id: &str,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+) -> Result<GoogleDriveUploadResult> {
+    let mut last_error = None;
+
+    for attempt in 1..=MAX_CHUNK_RETRIES {
+        checkpoint(control.as_ref()).await?;
+        let lease = pool.acquire().await;
+        let link = lease.link.clone();
+
+        let client = match drive_client(link.local_ip) {
+            Ok(client) => client,
+            Err(error) => {
+                pool.failure(&lease).await;
+                last_error = Some(error);
+                continue;
+            }
+        };
+
+        match client
+            .put(session_uri)
+            .header(CONTENT_LENGTH, "0")
+            .header(CONTENT_RANGE, "bytes */0")
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                let file: DriveFileResponse = response.json().await?;
+                pool.success(&lease, 0).await;
+
+                emit_upload_progress(
+                    progress.as_ref(),
+                    transfer_id,
+                    remote_name,
+                    "completed",
+                    0,
+                    0,
+                    0,
+                    &link,
+                    true,
+                );
+
+                return Ok(to_result(file, 0, &link));
+            }
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                pool.failure(&lease).await;
+                last_error = Some(anyhow::anyhow!(
+                    "Google Drive empty upload failed ({status}): {body}"
+                ));
+            }
+            Err(error) => {
+                pool.failure(&lease).await;
+                last_error = Some(error.into());
+            }
+        }
+
+        if attempt < MAX_CHUNK_RETRIES {
+            sleep(backoff(attempt)).await;
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Google Drive empty upload failed")))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_chunks_adaptive(
+    pool: &AdaptiveLinkPool,
     session_uri: &str,
     source: &Path,
     remote_name: &str,
     mime_type: &str,
     total_size: u64,
     chunk_size: u64,
-    link: &LinkConfig,
     transfer_id: &str,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
@@ -340,6 +512,7 @@ async fn upload_chunks(
     let mut file = File::open(source).await?;
     let mut offset = 0u64;
     let mut reported_offset = 0u64;
+    let mut used_links = BTreeSet::new();
 
     while offset < total_size {
         checkpoint(control.as_ref()).await?;
@@ -356,6 +529,37 @@ async fn upload_chunks(
         loop {
             checkpoint(control.as_ref()).await?;
             attempt += 1;
+
+            let lease = pool.acquire().await;
+            let link = lease.link.clone();
+            used_links.insert(link.name.clone());
+
+            if attempt > 1 {
+                emit_upload_progress(
+                    progress.as_ref(),
+                    transfer_id,
+                    remote_name,
+                    "failover",
+                    0,
+                    reported_offset,
+                    total_size,
+                    &link,
+                    false,
+                );
+            }
+
+            let client = match drive_client(link.local_ip) {
+                Ok(client) => client,
+                Err(error) => {
+                    pool.failure(&lease).await;
+
+                    if attempt >= MAX_CHUNK_RETRIES {
+                        return Err(error);
+                    }
+
+                    continue;
+                }
+            };
 
             let response = client
                 .put(session_uri)
@@ -379,6 +583,9 @@ async fn upload_chunks(
                         .await
                         .context("invalid Google Drive completion response")?;
 
+                    let accepted = total_size.saturating_sub(offset).min(length);
+                    pool.success(&lease, accepted).await;
+
                     let delta = total_size.saturating_sub(reported_offset);
                     emit_upload_progress(
                         progress.as_ref(),
@@ -388,27 +595,38 @@ async fn upload_chunks(
                         delta,
                         total_size,
                         total_size,
-                        link,
+                        &link,
                         true,
                     );
 
-                    return Ok(to_result(uploaded, total_size, link));
+                    let mut result = to_result(uploaded, total_size, &link);
+                    if used_links.len() > 1 {
+                        result.link_used =
+                            used_links.iter().cloned().collect::<Vec<_>>().join(" + ");
+                    }
+                    return Ok(result);
                 }
                 Ok(response) if response.status().as_u16() == 308 => {
                     let next_offset =
                         next_offset_from_range(response.headers().get(RANGE), end + 1);
-                    let delta = next_offset.saturating_sub(reported_offset);
+                    let accepted = next_offset.saturating_sub(offset).min(length);
+                    pool.success(&lease, accepted).await;
 
+                    let delta = next_offset.saturating_sub(reported_offset);
                     if delta > 0 {
                         emit_upload_progress(
                             progress.as_ref(),
                             transfer_id,
                             remote_name,
-                            "transferring",
+                            if attempt > 1 {
+                                "failover-active"
+                            } else {
+                                "transferring"
+                            },
                             delta,
                             next_offset,
                             total_size,
-                            link,
+                            &link,
                             false,
                         );
                         reported_offset = next_offset;
@@ -419,18 +637,21 @@ async fn upload_chunks(
                 }
                 Ok(response)
                     if response.status().is_server_error()
-                        || response.status() == StatusCode::TOO_MANY_REQUESTS =>
+                        || response.status() == StatusCode::TOO_MANY_REQUESTS
+                        || response.status() == StatusCode::REQUEST_TIMEOUT =>
                 {
+                    let status = response.status();
+                    pool.failure(&lease).await;
+
                     if attempt >= MAX_CHUNK_RETRIES {
-                        let status = response.status();
                         let body = response.text().await.unwrap_or_default();
-                        bail!("Google Drive upload failed after retries ({status}): {body}");
+                        bail!("Google Drive upload failed after failover ({status}): {body}");
                     }
 
-                    sleep(backoff(attempt)).await;
-                    let known_offset = query_upload_offset(client, session_uri, total_size)
-                        .await
-                        .unwrap_or(offset);
+                    let (known_offset, probe_link) =
+                        query_upload_offset_with_failover(pool, session_uri, total_size)
+                            .await
+                            .unwrap_or((offset, link.clone()));
 
                     if known_offset > reported_offset {
                         let delta = known_offset - reported_offset;
@@ -438,11 +659,11 @@ async fn upload_chunks(
                             progress.as_ref(),
                             transfer_id,
                             remote_name,
-                            "retry-recovered",
+                            "failover-recovered",
                             delta,
                             known_offset,
                             total_size,
-                            link,
+                            &probe_link,
                             false,
                         );
                         reported_offset = known_offset;
@@ -452,21 +673,27 @@ async fn upload_chunks(
                         offset = known_offset;
                         break;
                     }
+
+                    sleep(backoff(attempt)).await;
                 }
                 Ok(response) => {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
+                    pool.failure(&lease).await;
                     bail!("Google Drive upload failed ({status}): {body}");
                 }
                 Err(error) => {
+                    pool.failure(&lease).await;
+
                     if attempt >= MAX_CHUNK_RETRIES {
-                        return Err(error).context("Google Drive chunk upload failed after retries");
+                        return Err(error)
+                            .context("Google Drive chunk upload failed after multi-WAN failover");
                     }
 
-                    sleep(backoff(attempt)).await;
-                    let known_offset = query_upload_offset(client, session_uri, total_size)
-                        .await
-                        .unwrap_or(offset);
+                    let (known_offset, probe_link) =
+                        query_upload_offset_with_failover(pool, session_uri, total_size)
+                            .await
+                            .unwrap_or((offset, link.clone()));
 
                     if known_offset > reported_offset {
                         let delta = known_offset - reported_offset;
@@ -474,11 +701,11 @@ async fn upload_chunks(
                             progress.as_ref(),
                             transfer_id,
                             remote_name,
-                            "retry-recovered",
+                            "failover-recovered",
                             delta,
                             known_offset,
                             total_size,
-                            link,
+                            &probe_link,
                             false,
                         );
                         reported_offset = known_offset;
@@ -488,6 +715,8 @@ async fn upload_chunks(
                         offset = known_offset;
                         break;
                     }
+
+                    sleep(backoff(attempt)).await;
                 }
             }
         }
@@ -513,6 +742,41 @@ async fn query_upload_offset(client: &Client, session_uri: &str, total_size: u64
     }
 
     bail!("unable to query Google Drive upload status: {}", response.status())
+}
+
+async fn query_upload_offset_with_failover(
+    pool: &AdaptiveLinkPool,
+    session_uri: &str,
+    total_size: u64,
+) -> Result<(u64, LinkConfig)> {
+    let mut last_error = None;
+
+    for _ in 0..MAX_CHUNK_RETRIES {
+        let lease = pool.acquire().await;
+        let link = lease.link.clone();
+
+        let client = match drive_client(link.local_ip) {
+            Ok(client) => client,
+            Err(error) => {
+                pool.failure(&lease).await;
+                last_error = Some(error);
+                continue;
+            }
+        };
+
+        match query_upload_offset(&client, session_uri, total_size).await {
+            Ok(offset) => {
+                pool.release(&lease).await;
+                return Ok((offset, link));
+            }
+            Err(error) => {
+                pool.failure(&lease).await;
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("unable to query Drive upload offset")))
 }
 
 async fn checkpoint(control: Option<&TransferControl>) -> Result<()> {
@@ -565,18 +829,6 @@ fn drive_client(local_ip: IpAddr) -> Result<Client> {
         .redirect(Policy::none())
         .build()
         .context("failed to build Google Drive client bound to local IP")
-}
-
-fn expand_weighted_links(links: &[LinkConfig]) -> Vec<LinkConfig> {
-    let mut result = Vec::new();
-
-    for link in links {
-        for _ in 0..link.weight.max(1) {
-            result.push(link.clone());
-        }
-    }
-
-    result
 }
 
 fn validate_chunk_size(chunk_size: u64) -> Result<()> {

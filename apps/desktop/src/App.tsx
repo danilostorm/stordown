@@ -747,10 +747,10 @@ export default function App() {
         {view === "upload" && (
           <form className="downloadCard" onSubmit={submitUpload}>
             <div className="notice">
-              <strong>Google Drive + fila Multi-WAN</strong>
+              <strong>Google Drive + Smart Multi-WAN</strong>
               <span>
-                Você pode adicionar vários lotes. O StorDown executa até duas transferências da
-                fila simultaneamente e mantém o histórico no SQLite local.
+                Lotes usam um pool adaptativo entre as WANs. Cada bloco resumível pode trocar de
+                interface após falha, enquanto vários arquivos continuam em paralelo para somar upload.
               </span>
             </div>
 

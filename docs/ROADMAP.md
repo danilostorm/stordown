@@ -55,9 +55,9 @@
 
 ## V0.5 - Multi-WAN upload acceleration
 
-- [ ] Smart per-file assignment across WANs
+- [x] Smart per-file/chunk assignment across WANs for Drive batches
 - [x] Per-WAN upload telemetry for direct Drive batches
-- [ ] Upload failover and reassignment
+- [x] Drive upload failover and chunk reassignment between WANs
 - [ ] StorDown Relay protocol
 - [ ] One large upload striped across two or more WANs through Relay
 - [ ] Optional self-hosted Relay on VPS/Unraid
