@@ -1,5 +1,9 @@
-use crate::model::{
-    DownloadRequest, DownloadResult, LinkConfig, ProbeResult, ProgressCallback, TransferProgress,
+use crate::{
+    control::TransferControl,
+    model::{
+        DownloadRequest, DownloadResult, LinkConfig, ProbeResult, ProgressCallback,
+        TransferProgress,
+    },
 };
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
@@ -7,6 +11,7 @@ use reqwest::{
     header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     Client, StatusCode,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeSet, HashMap},
     net::IpAddr,
@@ -21,9 +26,18 @@ use tokio::{
     fs::{self, File, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt},
     task::JoinSet,
+    time::sleep,
 };
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+const MAX_SEGMENT_RETRIES: usize = 5;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PartManifest {
+    url: String,
+    size: u64,
+    segments: usize,
+}
 
 pub async fn probe(url: &str) -> Result<ProbeResult> {
     probe_url(url, &HashMap::new()).await
@@ -37,6 +51,15 @@ pub async fn download_with_progress(
     request: DownloadRequest,
     transfer_id: String,
     progress: Option<ProgressCallback>,
+) -> Result<DownloadResult> {
+    download_with_control(request, transfer_id, progress, None).await
+}
+
+pub async fn download_with_control(
+    request: DownloadRequest,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
 ) -> Result<DownloadResult> {
     if request.connections == 0 {
         bail!("connections must be greater than zero");
@@ -53,6 +76,8 @@ pub async fn download_with_progress(
         bail!("at least one enabled network link is required");
     }
 
+    checkpoint(control.as_ref()).await?;
+
     let metadata = probe_url(&request.url, &request.headers).await?;
 
     if metadata.accepts_ranges {
@@ -64,6 +89,7 @@ pub async fn download_with_progress(
                     size,
                     transfer_id,
                     progress,
+                    control,
                 )
                 .await;
             }
@@ -76,6 +102,7 @@ pub async fn download_with_progress(
         metadata.size,
         transfer_id,
         progress,
+        control,
     )
     .await
 }
@@ -93,8 +120,6 @@ async fn probe_url(url: &str, headers: &HashMap<String, String>) -> Result<Probe
         }
     }
 
-    // Many CDNs omit Accept-Ranges on HEAD even though byte ranges work.
-    // A one-byte request is a more reliable capability probe.
     let response = request_with_headers(client.get(url).header(RANGE, "bytes=0-0"), headers)
         .send()
         .await?;
@@ -167,8 +192,10 @@ async fn download_single(
     expected_size: Option<u64>,
     transfer_id: String,
     progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
 ) -> Result<DownloadResult> {
     ensure_parent(&request.output).await?;
+    checkpoint(control.as_ref()).await?;
 
     let client = client_for(link.local_ip)?;
     let req = request_with_headers(client.get(&request.url), &request.headers);
@@ -182,6 +209,8 @@ async fn download_single(
     let item = output_name(&request.output);
 
     while let Some(chunk) = stream.next().await {
+        checkpoint(control.as_ref()).await?;
+
         let chunk = chunk?;
         file.write_all(&chunk).await?;
 
@@ -251,12 +280,14 @@ async fn download_segmented(
     size: u64,
     transfer_id: String,
     progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
 ) -> Result<DownloadResult> {
     ensure_parent(&request.output).await?;
 
     let segments = request.connections.min(size.max(1) as usize);
     let part_dir = part_dir_for(&request.output);
-    fs::create_dir_all(&part_dir).await?;
+
+    prepare_part_dir(&part_dir, &request.url, size, segments).await?;
 
     let weighted_links = expand_weighted_links(&links);
     let aggregate = Arc::new(AtomicU64::new(0));
@@ -273,9 +304,10 @@ async fn download_segmented(
         let transfer_id = transfer_id.clone();
         let item = item.clone();
         let aggregate = aggregate.clone();
+        let control = control.clone();
 
         jobs.spawn(async move {
-            download_range(
+            download_range_resumable(
                 &url,
                 &headers,
                 &part,
@@ -287,6 +319,7 @@ async fn download_segmented(
                 &item,
                 aggregate,
                 progress,
+                control,
             )
             .await
             .map(|bytes| (index, bytes, link.name))
@@ -306,6 +339,7 @@ async fn download_segmented(
         bail!("downloaded {total} bytes but expected {size}");
     }
 
+    checkpoint(control.as_ref()).await?;
     assemble_parts(&part_dir, &request.output, segments).await?;
     fs::remove_dir_all(&part_dir).await?;
 
@@ -333,7 +367,7 @@ async fn download_segmented(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn download_range(
+async fn download_range_resumable(
     url: &str,
     headers: &HashMap<String, String>,
     part_path: &Path,
@@ -345,90 +379,241 @@ async fn download_range(
     item: &str,
     aggregate: Arc<AtomicU64>,
     progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
 ) -> Result<u64> {
     let expected = end - start + 1;
-    let client = client_for(link.local_ip)?;
-    let req = request_with_headers(
-        client.get(url).header(RANGE, format!("bytes={start}-{end}")),
-        headers,
-    );
+    let mut existing = part_len(part_path).await;
 
-    let response = req.send().await?;
-
-    if response.status() != StatusCode::PARTIAL_CONTENT {
-        bail!(
-            "server ignored HTTP Range for {} on {} (status {})",
-            link.name,
-            link.local_ip,
-            response.status()
-        );
+    if existing > expected {
+        let _ = fs::remove_file(part_path).await;
+        existing = 0;
     }
 
-    if response.headers().get(CONTENT_RANGE).is_none() {
-        bail!("server returned 206 without Content-Range");
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut file = File::create(part_path).await?;
-    let mut written = 0u64;
-    let mut pending_delta = 0u64;
-    let mut last_emit = Instant::now();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        file.write_all(&chunk).await?;
-
-        let delta = chunk.len() as u64;
-        written += delta;
-        pending_delta += delta;
-        let overall = aggregate.fetch_add(delta, Ordering::Relaxed) + delta;
-
-        if last_emit.elapsed() >= PROGRESS_INTERVAL {
-            emit_progress(
-                progress.as_ref(),
-                transfer_id,
-                "download",
-                item,
-                "transferring",
-                pending_delta,
-                overall,
-                Some(total_size),
-                link,
-                false,
-            );
-            pending_delta = 0;
-            last_emit = Instant::now();
-        }
-    }
-
-    file.flush().await?;
-
-    if pending_delta > 0 {
+    if existing > 0 {
+        let overall = aggregate.fetch_add(existing, Ordering::Relaxed) + existing;
         emit_progress(
             progress.as_ref(),
             transfer_id,
             "download",
             item,
-            "transferring",
-            pending_delta,
-            aggregate.load(Ordering::Relaxed),
+            "resumed",
+            0,
+            overall,
             Some(total_size),
             link,
             false,
         );
     }
 
-    if written != expected {
-        bail!(
-            "segment {}-{} wrote {} bytes, expected {}",
-            start,
-            end,
-            written,
-            expected
-        );
+    if existing == expected {
+        return Ok(expected);
     }
 
-    Ok(written)
+    let client = client_for(link.local_ip)?;
+    let mut attempt = 0usize;
+
+    loop {
+        checkpoint(control.as_ref()).await?;
+
+        let current_len = part_len(part_path).await;
+
+        if current_len == expected {
+            return Ok(expected);
+        }
+
+        if current_len > expected {
+            bail!(
+                "segment {}-{} contains {} bytes, expected at most {}",
+                start,
+                end,
+                current_len,
+                expected
+            );
+        }
+
+        attempt += 1;
+        let resume_start = start + current_len;
+        let req = request_with_headers(
+            client
+                .get(url)
+                .header(RANGE, format!("bytes={resume_start}-{end}")),
+            headers,
+        );
+
+        let response = match req.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                if attempt >= MAX_SEGMENT_RETRIES {
+                    return Err(error).context("segment request failed after retries");
+                }
+
+                sleep(retry_backoff(attempt)).await;
+                continue;
+            }
+        };
+
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            if (response.status().is_server_error()
+                || response.status() == StatusCode::TOO_MANY_REQUESTS)
+                && attempt < MAX_SEGMENT_RETRIES
+            {
+                sleep(retry_backoff(attempt)).await;
+                continue;
+            }
+
+            bail!(
+                "server ignored HTTP Range for {} on {} (status {})",
+                link.name,
+                link.local_ip,
+                response.status()
+            );
+        }
+
+        if response.headers().get(CONTENT_RANGE).is_none() {
+            bail!("server returned 206 without Content-Range");
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(part_path)
+            .await?;
+
+        let mut pending_delta = 0u64;
+        let mut last_emit = Instant::now();
+        let mut stream_failed = false;
+
+        while let Some(next) = stream.next().await {
+            checkpoint(control.as_ref()).await?;
+
+            match next {
+                Ok(chunk) => {
+                    file.write_all(&chunk).await?;
+
+                    let delta = chunk.len() as u64;
+                    pending_delta += delta;
+                    let overall = aggregate.fetch_add(delta, Ordering::Relaxed) + delta;
+
+                    if last_emit.elapsed() >= PROGRESS_INTERVAL {
+                        emit_progress(
+                            progress.as_ref(),
+                            transfer_id,
+                            "download",
+                            item,
+                            if attempt > 1 { "retrying" } else { "transferring" },
+                            pending_delta,
+                            overall,
+                            Some(total_size),
+                            link,
+                            false,
+                        );
+                        pending_delta = 0;
+                        last_emit = Instant::now();
+                    }
+                }
+                Err(_) => {
+                    stream_failed = true;
+                    break;
+                }
+            }
+        }
+
+        file.flush().await?;
+
+        if pending_delta > 0 {
+            emit_progress(
+                progress.as_ref(),
+                transfer_id,
+                "download",
+                item,
+                if attempt > 1 { "retrying" } else { "transferring" },
+                pending_delta,
+                aggregate.load(Ordering::Relaxed),
+                Some(total_size),
+                link,
+                false,
+            );
+        }
+
+        let final_len = part_len(part_path).await;
+
+        if final_len == expected {
+            return Ok(expected);
+        }
+
+        if attempt >= MAX_SEGMENT_RETRIES {
+            if stream_failed {
+                bail!(
+                    "segment {}-{} failed after {} retries with {} of {} bytes",
+                    start,
+                    end,
+                    MAX_SEGMENT_RETRIES,
+                    final_len,
+                    expected
+                );
+            }
+
+            bail!(
+                "segment {}-{} ended with {} bytes, expected {}",
+                start,
+                end,
+                final_len,
+                expected
+            );
+        }
+
+        sleep(retry_backoff(attempt)).await;
+    }
+}
+
+async fn prepare_part_dir(
+    part_dir: &Path,
+    url: &str,
+    size: u64,
+    segments: usize,
+) -> Result<()> {
+    let expected = PartManifest {
+        url: url.to_owned(),
+        size,
+        segments,
+    };
+    let manifest_path = part_dir.join("manifest.json");
+
+    let reusable = match fs::read_to_string(&manifest_path).await {
+        Ok(raw) => serde_json::from_str::<PartManifest>(&raw)
+            .map(|stored| stored == expected)
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+
+    if part_dir.exists() && !reusable {
+        fs::remove_dir_all(part_dir).await?;
+    }
+
+    fs::create_dir_all(part_dir).await?;
+
+    if !reusable {
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&expected)?).await?;
+    }
+
+    Ok(())
+}
+
+async fn part_len(path: &Path) -> u64 {
+    fs::metadata(path).await.map(|metadata| metadata.len()).unwrap_or(0)
+}
+
+async fn checkpoint(control: Option<&TransferControl>) -> Result<()> {
+    if let Some(control) = control {
+        control.checkpoint().await?;
+    }
+
+    Ok(())
+}
+
+fn retry_backoff(attempt: usize) -> Duration {
+    Duration::from_millis(400 * 2u64.pow((attempt.saturating_sub(1)).min(4) as u32))
 }
 
 fn emit_progress(
@@ -547,7 +732,7 @@ async fn assemble_parts(part_dir: &Path, output: &Path, segments: usize) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{segment_bounds, total_from_content_range};
+    use super::{segment_bounds, total_from_content_range, PartManifest};
 
     #[test]
     fn segment_bounds_cover_entire_file_without_overlap() {
@@ -562,5 +747,21 @@ mod tests {
     fn parses_total_size_from_content_range() {
         assert_eq!(total_from_content_range("bytes 0-0/12345"), Some(12345));
         assert_eq!(total_from_content_range("bytes 0-0/*"), None);
+    }
+
+    #[test]
+    fn part_manifest_detects_incompatible_resume() {
+        let a = PartManifest {
+            url: "https://example.test/file".to_string(),
+            size: 100,
+            segments: 8,
+        };
+        let b = PartManifest {
+            url: "https://example.test/file".to_string(),
+            size: 100,
+            segments: 4,
+        };
+
+        assert_ne!(a, b);
     }
 }

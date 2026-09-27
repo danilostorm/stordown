@@ -14,8 +14,8 @@
 - [x] Batch Google Drive uploads distributed across multiple NICs
 - [x] Upload workspace in the desktop UI
 - [x] Live transfer progress events
-- [ ] Pause/resume metadata persisted to disk
-- [ ] Retry individual failed download segments
+- [x] Segmented HTTP resume metadata persisted to disk
+- [x] Retry and resume individual failed HTTP segments
 - [x] Automatic physical NIC discovery on Windows
 - [x] Per-link WAN/public-IP route verification
 - [x] Live per-link throughput measurement during transfers
@@ -27,7 +27,7 @@
 - [ ] Persistent history
 - [ ] Scheduler
 - [ ] Speed limits
-- [ ] Per-transfer connection controls
+- [x] Pause / resume / cancel controls for active transfers
 - [ ] Smart weighted balancing
 - [ ] Failover when one link disappears
 - [ ] File integrity verification

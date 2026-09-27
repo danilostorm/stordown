@@ -85,6 +85,7 @@ export default function App() {
   const [chunkMiB, setChunkMiB] = useState(8);
 
   const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
+  const [transferPaused, setTransferPaused] = useState(false);
   const [progressByItem, setProgressByItem] = useState<Record<string, TransferProgress>>({});
   const [linkSpeeds, setLinkSpeeds] = useState<Record<string, number>>({});
   const speedWindows = useRef<Record<string, SpeedWindow>>({});
@@ -137,10 +138,20 @@ export default function App() {
     listen<TransferProgress>("transfer-progress", ({ payload }) => {
       const progressKey = `${payload.transfer_id}:${payload.item}`;
 
-      setProgressByItem((current) => ({
-        ...current,
-        [progressKey]: payload,
-      }));
+      setProgressByItem((current) => {
+        const previous = current[progressKey];
+        const next =
+          previous &&
+          !payload.completed &&
+          payload.bytes_transferred < previous.bytes_transferred
+            ? { ...payload, bytes_transferred: previous.bytes_transferred }
+            : payload;
+
+        return {
+          ...current,
+          [progressKey]: next,
+        };
+      });
 
       const now = Date.now();
       const key = payload.local_ip;
@@ -177,8 +188,49 @@ export default function App() {
 
   function beginTelemetry(transferId: string) {
     setActiveTransferId(transferId);
+    setTransferPaused(false);
     setLinkSpeeds({});
     speedWindows.current = {};
+  }
+
+  async function pauseActiveTransfer() {
+    if (!activeTransferId) return;
+
+    try {
+      await invoke("pause_transfer", { transferId: activeTransferId });
+      setTransferPaused(true);
+      setLinkSpeeds({});
+      speedWindows.current = {};
+      setStatus("Transferência pausada");
+    } catch (error) {
+      setStatus(`Erro ao pausar: ${String(error)}`);
+    }
+  }
+
+  async function resumeActiveTransfer() {
+    if (!activeTransferId) return;
+
+    try {
+      await invoke("resume_transfer", { transferId: activeTransferId });
+      setTransferPaused(false);
+      setStatus("Transferência retomada");
+    } catch (error) {
+      setStatus(`Erro ao retomar: ${String(error)}`);
+    }
+  }
+
+  async function cancelActiveTransfer() {
+    if (!activeTransferId) return;
+
+    try {
+      await invoke("cancel_transfer", { transferId: activeTransferId });
+      setTransferPaused(false);
+      setLinkSpeeds({});
+      speedWindows.current = {};
+      setStatus("Cancelamento solicitado…");
+    } catch (error) {
+      setStatus(`Erro ao cancelar: ${String(error)}`);
+    }
   }
 
   async function detectNetworks() {
@@ -303,8 +355,14 @@ export default function App() {
         `Concluído: ${result.segments} segmentos • ${result.links_used.join(" + ")}`,
       );
     } catch (error) {
-      setStatus(`Erro: ${String(error)}`);
+      const message = String(error);
+      setStatus(
+        message.toLowerCase().includes("transfer cancelled")
+          ? "Download cancelado. As partes ficam salvas para retomada."
+          : `Erro: ${message}`,
+      );
     } finally {
+      setTransferPaused(false);
       setBusy(false);
     }
   }
@@ -330,8 +388,14 @@ export default function App() {
         `Upload concluído: ${result.length} arquivo(s) • ${routes.join(" + ")}`,
       );
     } catch (error) {
-      setStatus(`Erro: ${String(error)}`);
+      const message = String(error);
+      setStatus(
+        message.toLowerCase().includes("transfer cancelled")
+          ? "Upload cancelado."
+          : `Erro: ${message}`,
+      );
     } finally {
+      setTransferPaused(false);
       setBusy(false);
     }
   }
@@ -596,6 +660,11 @@ export default function App() {
             totalTransferred={totalTransferred}
             totalBytes={totalBytes}
             linkSpeeds={linkSpeeds}
+            paused={transferPaused}
+            canControl={busy && activeProgress.some((item) => !item.completed)}
+            onPause={pauseActiveTransfer}
+            onResume={resumeActiveTransfer}
+            onCancel={cancelActiveTransfer}
           />
         )}
 
@@ -657,11 +726,21 @@ function TransferTelemetry({
   totalTransferred,
   totalBytes,
   linkSpeeds,
+  paused,
+  canControl,
+  onPause,
+  onResume,
+  onCancel,
 }: {
   items: TransferProgress[];
   totalTransferred: number;
   totalBytes: number;
   linkSpeeds: Record<string, number>;
+  paused: boolean;
+  canControl: boolean;
+  onPause: () => void;
+  onResume: () => void;
+  onCancel: () => void;
 }) {
   const overallPercent =
     totalBytes > 0 ? Math.min(100, (totalTransferred / totalBytes) * 100) : 0;
@@ -673,8 +752,24 @@ function TransferTelemetry({
           <span>TRANSFERÊNCIA ATIVA</span>
           <strong>{overallPercent.toFixed(1)}%</strong>
         </div>
-        <div className="aggregateSpeed">
-          {formatSpeed(Object.values(linkSpeeds).reduce((sum, speed) => sum + speed, 0))}
+        <div className="telemetryActions">
+          <div className="aggregateSpeed">
+            {paused
+              ? "Pausado"
+              : formatSpeed(Object.values(linkSpeeds).reduce((sum, speed) => sum + speed, 0))}
+          </div>
+          {canControl && (
+            <>
+              {paused ? (
+                <button type="button" onClick={onResume}>Retomar</button>
+              ) : (
+                <button type="button" onClick={onPause}>Pausar</button>
+              )}
+              <button type="button" className="dangerButton" onClick={onCancel}>
+                Cancelar
+              </button>
+            </>
+          )}
         </div>
       </div>
 
