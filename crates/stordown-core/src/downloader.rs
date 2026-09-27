@@ -285,7 +285,8 @@ async fn download_segmented(
 ) -> Result<DownloadResult> {
     ensure_parent(&request.output).await?;
 
-    let workers = request.connections.min(size.max(1) as usize);
+    let max_workers = size.min(usize::MAX as u64).max(1) as usize;
+    let workers = request.connections.min(max_workers).max(1);
     let segments = adaptive_segment_count(size, workers);
     let part_dir = part_dir_for(&request.output);
 
