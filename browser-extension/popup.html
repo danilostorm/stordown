@@ -26,11 +26,25 @@
 
     <label class="toggleRow">
       <div>
-        <strong>Captura automática (beta)</strong>
-        <span>Envia downloads do navegador para a fila StorDown.</span>
+        <strong>Captura automática</strong>
+        <span>Envia downloads HTTP/HTTPS do navegador para a fila StorDown.</span>
       </div>
       <input id="autoCapture" type="checkbox" />
     </label>
+
+    <section class="authCard">
+      <div class="authInfo">
+        <span class="label">DOWNLOADS AUTENTICADOS</span>
+        <strong id="siteName">Site atual</strong>
+        <span id="siteAuthStatus">Verificando permissão…</span>
+      </div>
+      <button id="siteAuthButton" type="button">Autorizar site</button>
+    </section>
+
+    <p class="hint">
+      A autorização de login é por site. O StorDown só recebe cookies do domínio que você
+      autorizou e apenas quando captura um download daquele site.
+    </p>
 
     <p class="hint">
       Você também pode clicar com o botão direito em qualquer link e usar
