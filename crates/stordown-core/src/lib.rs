@@ -6,7 +6,8 @@ pub mod network;
 
 pub use cloud::{
     authorize_google_drive_desktop, refresh_google_access_token, upload_google_drive_batch,
-    upload_google_drive_batch_with_progress, upload_google_drive_file,
+    upload_google_drive_batch_with_control, upload_google_drive_batch_with_progress,
+    upload_google_drive_file, upload_google_drive_file_with_control,
     upload_google_drive_file_with_progress, GoogleDriveBatchUploadRequest,
     GoogleDriveUploadRequest, GoogleDriveUploadResult, GoogleOAuthTokens, DRIVE_FILE_SCOPE,
 };
