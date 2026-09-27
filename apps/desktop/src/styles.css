@@ -393,3 +393,203 @@ input:focus, textarea:focus, select:focus {
 .telemetryActions .dangerButton:hover {
   border-color: #a94d60;
 }
+
+
+.navItem:disabled {
+  opacity: .42;
+  cursor: default;
+}
+
+.navCount {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.navCount b {
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #202a3e;
+  color: #bfc8dc;
+  font-size: 10px;
+  text-align: center;
+}
+
+.listToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.listToolbar span {
+  color: #8490a8;
+  font-size: 12px;
+}
+
+.listToolbar button,
+.rowActions button {
+  border: 1px solid #34405a;
+  border-radius: 9px;
+  padding: 8px 11px;
+  background: #172033;
+  color: #eef1ff;
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.listToolbar button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.transferList {
+  display: grid;
+  gap: 10px;
+}
+
+.transferRow {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid #202a3c;
+  border-radius: 14px;
+  background: #0d131f;
+  cursor: pointer;
+  transition: border-color .15s ease, transform .15s ease;
+}
+
+.transferRow:hover {
+  border-color: #33415d;
+}
+
+.transferRow.selected {
+  border-color: #5b6de9;
+  box-shadow: 0 0 0 2px rgba(91, 109, 233, .08);
+}
+
+.transferKind {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: #151d2d;
+  color: #7f90ff;
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.transferMain {
+  min-width: 0;
+}
+
+.transferTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.transferTitle strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.transferMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 7px;
+  color: #79869f;
+  font-size: 10px;
+}
+
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.rowActions .dangerButton {
+  border-color: #51303a;
+  background: #27151b;
+  color: #ff9baa;
+}
+
+.statusBadge {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 8px;
+  border: 1px solid #33405a;
+  color: #c4ccdc;
+  background: #171f2f;
+  font-size: 9px;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.status-running {
+  color: #85e6b3;
+  border-color: #285b43;
+  background: #10251b;
+}
+
+.status-paused {
+  color: #ffd88a;
+  border-color: #664f27;
+  background: #2a2110;
+}
+
+.status-queued {
+  color: #aab4ff;
+  border-color: #3f4780;
+  background: #171a35;
+}
+
+.status-completed {
+  color: #85e6b3;
+  border-color: #285b43;
+}
+
+.status-failed,
+.status-cancelled {
+  color: #ff9baa;
+  border-color: #623542;
+  background: #28161b;
+}
+
+.status-interrupted {
+  color: #ffc783;
+  border-color: #624826;
+  background: #281d10;
+}
+
+.rowError {
+  margin-top: 8px;
+  color: #ff8997;
+  font-size: 10px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.emptyState {
+  padding: 44px 22px;
+  border: 1px dashed #29344a;
+  border-radius: 16px;
+  color: #7d899f;
+  background: #0c111b;
+  text-align: center;
+  font-size: 13px;
+}
