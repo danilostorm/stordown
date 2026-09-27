@@ -26,7 +26,8 @@ The repository currently contains:
 - unified download/upload queue with up to two simultaneous jobs;
 - persistent SQLite transfer history in the StorDown app-data folder;
 - native Windows save/open dialogs for download destinations and upload file selection;
-- Chrome/Edge native-messaging bridge with context-menu and beta automatic capture;
+- Chrome/Edge native-messaging bridge with context-menu and automatic capture;
+- opt-in browser cookie/referrer/user-agent handoff for authenticated downloads;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -214,3 +215,8 @@ Browser extension
 The browser copy is cancelled only after the desktop returns an acknowledgement that the transfer entered the StorDown queue. If StorDown is not running or the native host is unavailable, the browser download is left alone.
 
 See [browser-extension/README.md](browser-extension/README.md) for development installation and native-host registration.
+
+
+### Authenticated browser downloads
+
+The browser extension can optionally request cookie/site permissions for authenticated downloads. When enabled, only a small header set (`Cookie`, `Referer`, `User-Agent`, and `Origin` when present) is accepted by the desktop bridge. Header values are bounded in size, used only for the live request, and are not persisted in the SQLite transfer history.
