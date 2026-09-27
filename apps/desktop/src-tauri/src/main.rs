@@ -7,14 +7,16 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     process::Command,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use stordown_core::{
-    authorize_google_drive_desktop, download, probe_links, refresh_google_access_token,
-    upload_google_drive_batch, DownloadRequest, DownloadResult, GoogleDriveBatchUploadRequest,
-    GoogleDriveUploadResult, LinkConfig, LinkProbeStatus,
+    authorize_google_drive_desktop, download_with_progress, probe_links,
+    refresh_google_access_token, upload_google_drive_batch_with_progress, DownloadRequest,
+    DownloadResult, GoogleDriveBatchUploadRequest, GoogleDriveUploadResult, LinkConfig,
+    LinkProbeStatus, ProgressCallback,
 };
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
 const GOOGLE_KEYRING_SERVICE: &str = "StorDown Google Drive";
@@ -49,6 +51,12 @@ struct GoogleAuthStatus {
     client_id: Option<String>,
     scope: Option<String>,
     expires_in_seconds: Option<u64>,
+}
+
+fn progress_emitter(app: AppHandle) -> ProgressCallback {
+    Arc::new(move |progress| {
+        let _ = app.emit("transfer-progress", progress);
+    })
 }
 
 fn parse_links(bind_ips: Vec<String>) -> Result<Vec<LinkConfig>, String> {
@@ -241,16 +249,22 @@ async fn start_download(
     output: String,
     connections: usize,
     bind_ips: Vec<String>,
+    transfer_id: String,
+    app: AppHandle,
 ) -> Result<DownloadResult, String> {
     let links = parse_links(bind_ips)?;
 
-    download(DownloadRequest {
-        url,
-        output: PathBuf::from(output),
-        connections,
-        links,
-        headers: HashMap::new(),
-    })
+    download_with_progress(
+        DownloadRequest {
+            url,
+            output: PathBuf::from(output),
+            connections,
+            links,
+            headers: HashMap::new(),
+        },
+        transfer_id,
+        Some(progress_emitter(app)),
+    )
     .await
     .map_err(|error| error.to_string())
 }
@@ -261,6 +275,8 @@ async fn start_drive_upload(
     parent_id: Option<String>,
     bind_ips: Vec<String>,
     chunk_mib: u64,
+    transfer_id: String,
+    app: AppHandle,
     state: State<'_, GoogleAuthState>,
 ) -> Result<Vec<GoogleDriveUploadResult>, String> {
     if files.is_empty() {
@@ -273,13 +289,17 @@ async fn start_drive_upload(
         .checked_mul(1024 * 1024)
         .ok_or_else(|| "Tamanho de bloco inválido".to_string())?;
 
-    upload_google_drive_batch(GoogleDriveBatchUploadRequest {
-        files: files.into_iter().map(PathBuf::from).collect(),
-        access_token,
-        parent_id: parent_id.filter(|value| !value.trim().is_empty()),
-        chunk_size,
-        links: parse_links(bind_ips)?,
-    })
+    upload_google_drive_batch_with_progress(
+        GoogleDriveBatchUploadRequest {
+            files: files.into_iter().map(PathBuf::from).collect(),
+            access_token,
+            parent_id: parent_id.filter(|value| !value.trim().is_empty()),
+            chunk_size,
+            links: parse_links(bind_ips)?,
+        },
+        transfer_id,
+        Some(progress_emitter(app)),
+    )
     .await
     .map_err(|error| error.to_string())
 }

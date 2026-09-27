@@ -13,12 +13,12 @@
 - [x] Google Drive resumable upload engine
 - [x] Batch Google Drive uploads distributed across multiple NICs
 - [x] Upload workspace in the desktop UI
-- [ ] Live transfer progress events
+- [x] Live transfer progress events
 - [ ] Pause/resume metadata persisted to disk
 - [ ] Retry individual failed download segments
 - [x] Automatic physical NIC discovery on Windows
 - [x] Per-link WAN/public-IP route verification
-- [ ] Per-link throughput measurement
+- [x] Live per-link throughput measurement during transfers
 
 ## V0.2 - Desktop transfer manager
 
@@ -56,7 +56,7 @@
 ## V0.5 - Multi-WAN upload acceleration
 
 - [ ] Smart per-file assignment across WANs
-- [ ] Per-WAN upload telemetry
+- [x] Per-WAN upload telemetry for direct Drive batches
 - [ ] Upload failover and reassignment
 - [ ] StorDown Relay protocol
 - [ ] One large upload striped across two or more WANs through Relay

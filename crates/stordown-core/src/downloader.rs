@@ -1,4 +1,6 @@
-use crate::model::{DownloadRequest, DownloadResult, LinkConfig, ProbeResult};
+use crate::model::{
+    DownloadRequest, DownloadResult, LinkConfig, ProbeResult, ProgressCallback, TransferProgress,
+};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::{
@@ -9,6 +11,11 @@ use std::{
     collections::{BTreeSet, HashMap},
     net::IpAddr,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
 };
 use tokio::{
     fs::{self, File, OpenOptions},
@@ -16,11 +23,21 @@ use tokio::{
     task::JoinSet,
 };
 
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+
 pub async fn probe(url: &str) -> Result<ProbeResult> {
     probe_url(url, &HashMap::new()).await
 }
 
 pub async fn download(request: DownloadRequest) -> Result<DownloadResult> {
+    download_with_progress(request, "download".to_string(), None).await
+}
+
+pub async fn download_with_progress(
+    request: DownloadRequest,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+) -> Result<DownloadResult> {
     if request.connections == 0 {
         bail!("connections must be greater than zero");
     }
@@ -41,12 +58,26 @@ pub async fn download(request: DownloadRequest) -> Result<DownloadResult> {
     if metadata.accepts_ranges {
         if let Some(size) = metadata.size {
             if size > 0 {
-                return download_segmented(request, links, size).await;
+                return download_segmented(
+                    request,
+                    links,
+                    size,
+                    transfer_id,
+                    progress,
+                )
+                .await;
             }
         }
     }
 
-    download_single(request, &links[0]).await
+    download_single(
+        request,
+        &links[0],
+        metadata.size,
+        transfer_id,
+        progress,
+    )
+    .await
 }
 
 async fn probe_url(url: &str, headers: &HashMap<String, String>) -> Result<ProbeResult> {
@@ -130,23 +161,81 @@ fn request_with_headers(
     builder
 }
 
-async fn download_single(request: DownloadRequest, link: &LinkConfig) -> Result<DownloadResult> {
+async fn download_single(
+    request: DownloadRequest,
+    link: &LinkConfig,
+    expected_size: Option<u64>,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+) -> Result<DownloadResult> {
     ensure_parent(&request.output).await?;
 
     let client = client_for(link.local_ip)?;
     let req = request_with_headers(client.get(&request.url), &request.headers);
     let response = req.send().await?.error_for_status()?;
+    let total_size = response.content_length().or(expected_size);
     let mut stream = response.bytes_stream();
     let mut file = File::create(&request.output).await?;
     let mut written = 0u64;
+    let mut pending_delta = 0u64;
+    let mut last_emit = Instant::now();
+    let item = output_name(&request.output);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         file.write_all(&chunk).await?;
-        written += chunk.len() as u64;
+
+        let delta = chunk.len() as u64;
+        written += delta;
+        pending_delta += delta;
+
+        if last_emit.elapsed() >= PROGRESS_INTERVAL {
+            emit_progress(
+                progress.as_ref(),
+                &transfer_id,
+                "download",
+                &item,
+                "transferring",
+                pending_delta,
+                written,
+                total_size,
+                link,
+                false,
+            );
+            pending_delta = 0;
+            last_emit = Instant::now();
+        }
     }
 
     file.flush().await?;
+
+    if pending_delta > 0 {
+        emit_progress(
+            progress.as_ref(),
+            &transfer_id,
+            "download",
+            &item,
+            "transferring",
+            pending_delta,
+            written,
+            total_size,
+            link,
+            false,
+        );
+    }
+
+    emit_progress(
+        progress.as_ref(),
+        &transfer_id,
+        "download",
+        &item,
+        "completed",
+        0,
+        written,
+        total_size.or(Some(written)),
+        link,
+        true,
+    );
 
     Ok(DownloadResult {
         output: request.output,
@@ -160,6 +249,8 @@ async fn download_segmented(
     request: DownloadRequest,
     links: Vec<LinkConfig>,
     size: u64,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
 ) -> Result<DownloadResult> {
     ensure_parent(&request.output).await?;
 
@@ -168,6 +259,8 @@ async fn download_segmented(
     fs::create_dir_all(&part_dir).await?;
 
     let weighted_links = expand_weighted_links(&links);
+    let aggregate = Arc::new(AtomicU64::new(0));
+    let item = output_name(&request.output);
     let mut jobs = JoinSet::new();
 
     for index in 0..segments {
@@ -176,11 +269,27 @@ async fn download_segmented(
         let url = request.url.clone();
         let headers = request.headers.clone();
         let part = part_dir.join(format!("{index:05}.part"));
+        let progress = progress.clone();
+        let transfer_id = transfer_id.clone();
+        let item = item.clone();
+        let aggregate = aggregate.clone();
 
         jobs.spawn(async move {
-            download_range(&url, &headers, &part, start, end, &link)
-                .await
-                .map(|bytes| (index, bytes, link.name))
+            download_range(
+                &url,
+                &headers,
+                &part,
+                start,
+                end,
+                &link,
+                size,
+                &transfer_id,
+                &item,
+                aggregate,
+                progress,
+            )
+            .await
+            .map(|bytes| (index, bytes, link.name))
         });
     }
 
@@ -200,6 +309,21 @@ async fn download_segmented(
     assemble_parts(&part_dir, &request.output, segments).await?;
     fs::remove_dir_all(&part_dir).await?;
 
+    if let Some(link) = links.first() {
+        emit_progress(
+            progress.as_ref(),
+            &transfer_id,
+            "download",
+            &item,
+            "completed",
+            0,
+            size,
+            Some(size),
+            link,
+            true,
+        );
+    }
+
     Ok(DownloadResult {
         output: request.output,
         bytes_written: total,
@@ -208,6 +332,7 @@ async fn download_segmented(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_range(
     url: &str,
     headers: &HashMap<String, String>,
@@ -215,6 +340,11 @@ async fn download_range(
     start: u64,
     end: u64,
     link: &LinkConfig,
+    total_size: u64,
+    transfer_id: &str,
+    item: &str,
+    aggregate: Arc<AtomicU64>,
+    progress: Option<ProgressCallback>,
 ) -> Result<u64> {
     let expected = end - start + 1;
     let client = client_for(link.local_ip)?;
@@ -241,14 +371,52 @@ async fn download_range(
     let mut stream = response.bytes_stream();
     let mut file = File::create(part_path).await?;
     let mut written = 0u64;
+    let mut pending_delta = 0u64;
+    let mut last_emit = Instant::now();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         file.write_all(&chunk).await?;
-        written += chunk.len() as u64;
+
+        let delta = chunk.len() as u64;
+        written += delta;
+        pending_delta += delta;
+        let overall = aggregate.fetch_add(delta, Ordering::Relaxed) + delta;
+
+        if last_emit.elapsed() >= PROGRESS_INTERVAL {
+            emit_progress(
+                progress.as_ref(),
+                transfer_id,
+                "download",
+                item,
+                "transferring",
+                pending_delta,
+                overall,
+                Some(total_size),
+                link,
+                false,
+            );
+            pending_delta = 0;
+            last_emit = Instant::now();
+        }
     }
 
     file.flush().await?;
+
+    if pending_delta > 0 {
+        emit_progress(
+            progress.as_ref(),
+            transfer_id,
+            "download",
+            item,
+            "transferring",
+            pending_delta,
+            aggregate.load(Ordering::Relaxed),
+            Some(total_size),
+            link,
+            false,
+        );
+    }
 
     if written != expected {
         bail!(
@@ -261,6 +429,34 @@ async fn download_range(
     }
 
     Ok(written)
+}
+
+fn emit_progress(
+    callback: Option<&ProgressCallback>,
+    transfer_id: &str,
+    direction: &str,
+    item: &str,
+    phase: &str,
+    bytes_delta: u64,
+    bytes_transferred: u64,
+    total_bytes: Option<u64>,
+    link: &LinkConfig,
+    completed: bool,
+) {
+    if let Some(callback) = callback {
+        callback(TransferProgress {
+            transfer_id: transfer_id.to_owned(),
+            direction: direction.to_owned(),
+            item: item.to_owned(),
+            phase: phase.to_owned(),
+            bytes_delta,
+            bytes_transferred,
+            total_bytes,
+            link_name: link.name.clone(),
+            local_ip: link.local_ip,
+            completed,
+        });
+    }
 }
 
 fn client_for(local_ip: IpAddr) -> Result<Client> {
@@ -301,6 +497,14 @@ fn part_dir_for(output: &Path) -> PathBuf {
         .unwrap_or("download");
 
     output.with_file_name(format!("{name}.stordown.parts"))
+}
+
+fn output_name(output: &Path) -> String {
+    output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download")
+        .to_owned()
 }
 
 async fn ensure_parent(output: &Path) -> Result<()> {

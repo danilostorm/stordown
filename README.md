@@ -20,6 +20,7 @@ The repository currently contains:
 - UDM Pro multi-WAN setup notes;
 - automatic discovery of active physical Windows NICs;
 - per-interface public-IP route tests to verify UDM WAN policies;
+- live transfer progress and real-time speed per local interface/WAN;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -132,3 +133,18 @@ Ethernet 2  192.168.x.y -> public IP B
 ```
 
 Different public IPs confirm that the two source interfaces are reaching the Internet through distinct egress paths.
+
+
+## Live multi-WAN telemetry
+
+The desktop backend now streams progress events from the Rust transfer engine into the Tauri UI.
+
+During a download or Google Drive upload, StorDown shows:
+
+- overall transferred bytes and percentage;
+- per-file upload progress;
+- the local interface used by each worker/file;
+- live bytes per second per local IP/WAN;
+- aggregate speed across all active links.
+
+For segmented HTTP downloads the progress counter is shared across workers, so one file can show aggregate progress while each WAN still reports its own throughput. Google Drive batch uploads report each file independently while the sidebar shows the throughput of each WAN.

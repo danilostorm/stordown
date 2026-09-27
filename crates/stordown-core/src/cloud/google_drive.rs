@@ -1,4 +1,4 @@
-use crate::model::LinkConfig;
+use crate::model::{LinkConfig, ProgressCallback, TransferProgress};
 use anyhow::{bail, Context, Result};
 use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE},
@@ -83,6 +83,21 @@ pub async fn upload_google_drive_file(
     request: GoogleDriveUploadRequest,
     link: LinkConfig,
 ) -> Result<GoogleDriveUploadResult> {
+    upload_google_drive_file_with_progress(
+        request,
+        link,
+        "drive-upload".to_string(),
+        None,
+    )
+    .await
+}
+
+pub async fn upload_google_drive_file_with_progress(
+    request: GoogleDriveUploadRequest,
+    link: LinkConfig,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+) -> Result<GoogleDriveUploadResult> {
     validate_chunk_size(request.chunk_size)?;
 
     if !link.enabled {
@@ -107,6 +122,18 @@ pub async fn upload_google_drive_file(
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
+    emit_upload_progress(
+        progress.as_ref(),
+        &transfer_id,
+        &remote_name,
+        "starting",
+        0,
+        0,
+        total_size,
+        &link,
+        false,
+    );
+
     let client = drive_client(link.local_ip)?;
     let session_uri = create_resumable_session(
         &client,
@@ -127,6 +154,19 @@ pub async fn upload_google_drive_file(
             .await?;
         let response = response.error_for_status()?;
         let file: DriveFileResponse = response.json().await?;
+
+        emit_upload_progress(
+            progress.as_ref(),
+            &transfer_id,
+            &remote_name,
+            "completed",
+            0,
+            0,
+            0,
+            &link,
+            true,
+        );
+
         return Ok(to_result(file, 0, &link));
     }
 
@@ -134,16 +174,32 @@ pub async fn upload_google_drive_file(
         &client,
         &session_uri,
         &request.source,
+        &remote_name,
         &mime_type,
         total_size,
         request.chunk_size,
         &link,
+        &transfer_id,
+        progress,
     )
     .await
 }
 
 pub async fn upload_google_drive_batch(
     request: GoogleDriveBatchUploadRequest,
+) -> Result<Vec<GoogleDriveUploadResult>> {
+    upload_google_drive_batch_with_progress(
+        request,
+        "drive-batch".to_string(),
+        None,
+    )
+    .await
+}
+
+pub async fn upload_google_drive_batch_with_progress(
+    request: GoogleDriveBatchUploadRequest,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
 ) -> Result<Vec<GoogleDriveUploadResult>> {
     validate_chunk_size(request.chunk_size)?;
 
@@ -169,9 +225,11 @@ pub async fn upload_google_drive_batch(
         let access_token = request.access_token.clone();
         let parent_id = request.parent_id.clone();
         let chunk_size = request.chunk_size;
+        let transfer_id = transfer_id.clone();
+        let progress = progress.clone();
 
         jobs.spawn(async move {
-            let result = upload_google_drive_file(
+            let result = upload_google_drive_file_with_progress(
                 GoogleDriveUploadRequest {
                     source,
                     access_token,
@@ -181,6 +239,8 @@ pub async fn upload_google_drive_batch(
                     chunk_size,
                 },
                 link,
+                transfer_id,
+                progress,
             )
             .await?;
 
@@ -236,17 +296,22 @@ async fn create_resumable_session(
         .context("Google Drive did not return a resumable session Location")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_chunks(
     client: &Client,
     session_uri: &str,
     source: &Path,
+    remote_name: &str,
     mime_type: &str,
     total_size: u64,
     chunk_size: u64,
     link: &LinkConfig,
+    transfer_id: &str,
+    progress: Option<ProgressCallback>,
 ) -> Result<GoogleDriveUploadResult> {
     let mut file = File::open(source).await?;
     let mut offset = 0u64;
+    let mut reported_offset = 0u64;
 
     while offset < total_size {
         let length = min(chunk_size, total_size - offset);
@@ -282,10 +347,43 @@ async fn upload_chunks(
                         .json()
                         .await
                         .context("invalid Google Drive completion response")?;
+
+                    let delta = total_size.saturating_sub(reported_offset);
+                    emit_upload_progress(
+                        progress.as_ref(),
+                        transfer_id,
+                        remote_name,
+                        "completed",
+                        delta,
+                        total_size,
+                        total_size,
+                        link,
+                        true,
+                    );
+
                     return Ok(to_result(uploaded, total_size, link));
                 }
                 Ok(response) if response.status().as_u16() == 308 => {
-                    offset = next_offset_from_range(response.headers().get(RANGE), end + 1);
+                    let next_offset =
+                        next_offset_from_range(response.headers().get(RANGE), end + 1);
+                    let delta = next_offset.saturating_sub(reported_offset);
+
+                    if delta > 0 {
+                        emit_upload_progress(
+                            progress.as_ref(),
+                            transfer_id,
+                            remote_name,
+                            "transferring",
+                            delta,
+                            next_offset,
+                            total_size,
+                            link,
+                            false,
+                        );
+                        reported_offset = next_offset;
+                    }
+
+                    offset = next_offset;
                     break;
                 }
                 Ok(response)
@@ -302,6 +400,23 @@ async fn upload_chunks(
                     let known_offset = query_upload_offset(client, session_uri, total_size)
                         .await
                         .unwrap_or(offset);
+
+                    if known_offset > reported_offset {
+                        let delta = known_offset - reported_offset;
+                        emit_upload_progress(
+                            progress.as_ref(),
+                            transfer_id,
+                            remote_name,
+                            "retry-recovered",
+                            delta,
+                            known_offset,
+                            total_size,
+                            link,
+                            false,
+                        );
+                        reported_offset = known_offset;
+                    }
+
                     if known_offset != offset {
                         offset = known_offset;
                         break;
@@ -321,6 +436,23 @@ async fn upload_chunks(
                     let known_offset = query_upload_offset(client, session_uri, total_size)
                         .await
                         .unwrap_or(offset);
+
+                    if known_offset > reported_offset {
+                        let delta = known_offset - reported_offset;
+                        emit_upload_progress(
+                            progress.as_ref(),
+                            transfer_id,
+                            remote_name,
+                            "retry-recovered",
+                            delta,
+                            known_offset,
+                            total_size,
+                            link,
+                            false,
+                        );
+                        reported_offset = known_offset;
+                    }
+
                     if known_offset != offset {
                         offset = known_offset;
                         break;
@@ -336,7 +468,7 @@ async fn upload_chunks(
 async fn query_upload_offset(client: &Client, session_uri: &str, total_size: u64) -> Result<u64> {
     let response = client
         .put(session_uri)
-        .header(CONTENT_LENGTH, 0)
+        .header(CONTENT_LENGTH, "0")
         .header(CONTENT_RANGE, format!("bytes */{total_size}"))
         .send()
         .await?;
@@ -350,6 +482,33 @@ async fn query_upload_offset(client: &Client, session_uri: &str, total_size: u64
     }
 
     bail!("unable to query Google Drive upload status: {}", response.status())
+}
+
+fn emit_upload_progress(
+    callback: Option<&ProgressCallback>,
+    transfer_id: &str,
+    item: &str,
+    phase: &str,
+    bytes_delta: u64,
+    bytes_transferred: u64,
+    total_bytes: u64,
+    link: &LinkConfig,
+    completed: bool,
+) {
+    if let Some(callback) = callback {
+        callback(TransferProgress {
+            transfer_id: transfer_id.to_owned(),
+            direction: "upload".to_string(),
+            item: item.to_owned(),
+            phase: phase.to_owned(),
+            bytes_delta,
+            bytes_transferred,
+            total_bytes: Some(total_bytes),
+            link_name: link.name.clone(),
+            local_ip: link.local_ip,
+            completed,
+        });
+    }
 }
 
 fn next_offset_from_range(range: Option<&reqwest::header::HeaderValue>, fallback: u64) -> u64 {
@@ -383,9 +542,7 @@ fn expand_weighted_links(links: &[LinkConfig]) -> Vec<LinkConfig> {
 
 fn validate_chunk_size(chunk_size: u64) -> Result<()> {
     if chunk_size == 0 || chunk_size % DRIVE_CHUNK_GRANULARITY != 0 {
-        bail!(
-            "Google Drive chunk size must be a non-zero multiple of 256 KiB"
-        );
+        bail!("Google Drive chunk size must be a non-zero multiple of 256 KiB");
     }
 
     Ok(())

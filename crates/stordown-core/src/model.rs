@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::IpAddr, path::PathBuf};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    path::PathBuf,
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkConfig {
@@ -42,3 +47,19 @@ pub struct DownloadResult {
     pub segments: usize,
     pub links_used: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransferProgress {
+    pub transfer_id: String,
+    pub direction: String,
+    pub item: String,
+    pub phase: String,
+    pub bytes_delta: u64,
+    pub bytes_transferred: u64,
+    pub total_bytes: Option<u64>,
+    pub link_name: String,
+    pub local_ip: IpAddr,
+    pub completed: bool,
+}
+
+pub type ProgressCallback = Arc<dyn Fn(TransferProgress) + Send + Sync>;
