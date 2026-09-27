@@ -35,9 +35,9 @@
 
 ## V0.3 - Browser integration
 
-- [ ] Windows native-messaging host
+- [x] Windows native-messaging host
 - [ ] One-click Chrome/Edge installer
-- [ ] Automatic download interception
+- [x] Automatic interception for direct HTTP/HTTPS downloads
 - [ ] Controlled cookie/header handoff
 - [ ] Download all links
 - [ ] Site-specific capture rules
