@@ -635,3 +635,113 @@ input:focus, textarea:focus, select:focus {
     justify-self: start;
   }
 }
+
+
+.settingsGrid {
+  display: grid;
+  gap: 18px;
+}
+
+.ruleEditor .grid2 {
+  grid-template-columns: 1fr 1fr;
+}
+
+.ruleOptions {
+  display: grid;
+  grid-template-columns: 1fr 160px;
+  gap: 16px;
+  align-items: end;
+}
+
+.checkRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 44px;
+}
+
+.checkRow input {
+  width: auto;
+  margin: 0;
+}
+
+.ruleFormActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ruleFormActions > button:not(.primary) {
+  border: 1px solid #303a50;
+  border-radius: 10px;
+  padding: 11px 14px;
+  background: #151c2a;
+  color: #d7ddec;
+  cursor: pointer;
+}
+
+.ruleList {
+  display: grid;
+  gap: 10px;
+}
+
+.ruleList .listToolbar small {
+  color: #78859f;
+}
+
+.ruleRow {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 18px;
+  align-items: center;
+  padding: 15px 16px;
+  border: 1px solid #212a3d;
+  border-radius: 13px;
+  background: #0d131f;
+}
+
+.ruleInfo {
+  min-width: 0;
+}
+
+.ruleState {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.ruleState.enabled {
+  color: #82e8b3;
+  background: rgba(85, 217, 139, .1);
+  border: 1px solid rgba(85, 217, 139, .28);
+}
+
+.ruleState.disabled {
+  color: #98a1b6;
+  background: rgba(138, 148, 170, .08);
+  border: 1px solid rgba(138, 148, 170, .22);
+}
+
+.ruleMeta {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  color: #7f8ba4;
+  font-size: 11px;
+}
+
+.ruleMeta span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1080px) {
+  .ruleOptions,
+  .ruleEditor .grid2 {
+    grid-template-columns: 1fr;
+  }
+}
