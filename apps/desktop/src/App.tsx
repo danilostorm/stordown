@@ -54,6 +54,7 @@ type TransferRecord = {
   created_at: number;
   updated_at: number;
   scheduled_at?: number | null;
+  expected_sha256?: string | null;
   error?: string | null;
 };
 
@@ -83,6 +84,7 @@ export default function App() {
   const [url, setUrl] = useState("");
   const [output, setOutput] = useState("C:\\Downloads\\arquivo.bin");
   const [connections, setConnections] = useState(8);
+  const [expectedSha256, setExpectedSha256] = useState("");
   const [downloadSchedule, setDownloadSchedule] = useState("");
   const [bindIps, setBindIps] = useState("192.168.30.101, 192.168.30.102");
   const [status, setStatus] = useState("Pronto");
@@ -391,6 +393,7 @@ export default function App() {
         output,
         connections,
         bindIps: links,
+        expectedSha256: expectedSha256 || null,
         transferId,
         scheduledAt: downloadSchedule
           ? Math.floor(new Date(downloadSchedule).getTime() / 1000)
@@ -688,6 +691,23 @@ export default function App() {
                   Procurar…
                 </button>
               </div>
+            </label>
+
+            <label>
+              Verificar SHA-256 — opcional
+              <input
+                value={expectedSha256}
+                onChange={(event) =>
+                  setExpectedSha256(event.target.value.replace(/\s+/g, "").toLowerCase())
+                }
+                maxLength={64}
+                pattern="[0-9a-fA-F]{64}"
+                placeholder="Ex.: e3b0c44298fc1c149afbf4c8996fb924..."
+              />
+              <small className="fieldHint">
+                Se informado, o StorDown só marca como concluído depois de calcular o arquivo final
+                e confirmar que os 64 caracteres SHA-256 correspondem.
+              </small>
             </label>
 
             <label>
@@ -1158,6 +1178,7 @@ function TransferList({
                   {record.total_bytes ? ` / ${formatBytes(record.total_bytes)}` : ""}
                 </span>
                 <span>{record.bind_ips.length} link(s)</span>
+                {record.expected_sha256 && <span>SHA-256 ✓</span>}
                 <span>
                   {record.status === "scheduled" && record.scheduled_at
                     ? `Inicia ${formatDate(record.scheduled_at)}`
@@ -1276,7 +1297,15 @@ function TransferTelemetry({
               <article key={`${item.transfer_id}:${item.item}`}>
                 <div className="itemTop">
                   <strong title={item.item}>{item.item}</strong>
-                  <span>{item.completed ? "Concluído" : `${percent.toFixed(1)}%`}</span>
+                  <span>
+                    {item.phase === "verified"
+                      ? "SHA-256 OK"
+                      : item.phase === "verifying"
+                        ? "Verificando…"
+                        : item.completed
+                          ? "Concluído"
+                          : `${percent.toFixed(1)}%`}
+                  </span>
                 </div>
                 <div className="miniTrack">
                   <div className="miniFill" style={{ width: `${percent}%` }} />
@@ -1285,6 +1314,8 @@ function TransferTelemetry({
                   <span>
                     {item.direction === "upload" ? "Upload" : "Download"} • {item.link_name}
                     {item.phase.startsWith("failover") ? " • Failover" : ""}
+                    {item.phase === "verifying" ? " • SHA-256" : ""}
+                    {item.phase === "verified" ? " • Integridade OK" : ""}
                   </span>
                   <span>
                     {formatBytes(item.bytes_transferred)}
