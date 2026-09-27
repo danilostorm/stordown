@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StorDown</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <div class="logo">S</div>
+      <div>
+        <strong>StorDown</strong>
+        <span>Browser Capture</span>
+      </div>
+    </header>
+
+    <section class="statusCard">
+      <div>
+        <span class="label">DESKTOP</span>
+        <strong id="desktopStatus">Verificando…</strong>
+      </div>
+      <button id="testButton" type="button">Testar</button>
+    </section>
+
+    <label class="toggleRow">
+      <div>
+        <strong>Captura automática</strong>
+        <span>Envia downloads do navegador para a fila StorDown.</span>
+      </div>
+      <input id="autoCapture" type="checkbox" />
+    </label>
+
+    <p class="hint">
+      Você também pode clicar com o botão direito em qualquer link e usar
+      <b>Baixar com StorDown</b>.
+    </p>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>
