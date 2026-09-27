@@ -9,9 +9,19 @@ chrome.runtime.onInstalled.addListener(() => {
     });
   });
 
-  chrome.storage.local.get("autoCapture").then((settings) => {
+  chrome.storage.local.get(["autoCapture", "authorizedOrigins"]).then((settings) => {
+    const updates = {};
+
     if (settings.autoCapture === undefined) {
-      chrome.storage.local.set({ autoCapture: false });
+      updates.autoCapture = false;
+    }
+
+    if (!Array.isArray(settings.authorizedOrigins)) {
+      updates.authorizedOrigins = [];
+    }
+
+    if (Object.keys(updates).length > 0) {
+      chrome.storage.local.set(updates);
     }
   });
 });
@@ -37,15 +47,63 @@ async function flashBadge(text) {
   setTimeout(() => chrome.action.setBadgeText({ text: "" }), 1800);
 }
 
+function permissionPattern(url) {
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) return null;
+    return `${parsed.origin}/*`;
+  } catch {
+    return null;
+  }
+}
+
+async function buildAuthHeaders(url, referrer) {
+  const pattern = permissionPattern(url);
+  if (!pattern) return {};
+
+  const origin = new URL(url).origin;
+  const { authorizedOrigins = [] } = await chrome.storage.local.get("authorizedOrigins");
+
+  if (!authorizedOrigins.includes(origin)) {
+    return {};
+  }
+
+  const granted = await chrome.permissions.contains({
+    permissions: ["cookies"],
+    origins: [pattern],
+  });
+
+  if (!granted) {
+    return {};
+  }
+
+  const headers = {};
+  const cookies = await chrome.cookies.getAll({ url });
+
+  if (cookies.length > 0) {
+    headers.Cookie = cookies
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
+  }
+
+  if (referrer && /^https?:\/\//i.test(referrer)) {
+    headers.Referer = referrer;
+  }
+
+  return headers;
+}
+
 chrome.contextMenus.onClicked.addListener(async (info) => {
   if (info.menuItemId !== "stordown-download-link" || !info.linkUrl) {
     return;
   }
 
+  const headers = await buildAuthHeaders(info.linkUrl, info.pageUrl || null);
   const response = await sendToStorDown({
     type: "download",
     url: info.linkUrl,
     source: "context-menu",
+    headers,
   });
 
   await flashBadge(response.ok ? "✓" : "!");
@@ -58,11 +116,13 @@ chrome.downloads.onCreated.addListener(async (item) => {
     return;
   }
 
+  const headers = await buildAuthHeaders(item.url, item.referrer || null);
   const response = await sendToStorDown({
     type: "download",
     url: item.url,
     filename: item.filename || null,
     source: "browser-download",
+    headers,
   });
 
   if (!response.ok) {

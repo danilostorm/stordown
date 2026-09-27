@@ -9,8 +9,29 @@ Chrome/Edge Manifest V3 integration for sending browser downloads to the StorDow
 - Optional automatic capture for direct HTTP/HTTPS browser downloads.
 - Native Messaging bridge through `cloud.hoststorm.stordown`.
 - Browser download is cancelled only after the StorDown desktop confirms the transfer was accepted into its queue.
+- **Per-site authenticated download support** with explicit cookie permission.
 
-Automatic capture is currently marked **beta** because authenticated downloads still need controlled cookie/header handoff.
+## Authenticated downloads
+
+StorDown does not request access to browser cookies for every website by default.
+
+Open the StorDown popup while you are on a site that requires login and click **Autorizar site**. Chrome/Edge then asks for the optional `cookies` permission and host access only for that origin.
+
+When StorDown captures a download from an authorized origin:
+
+```text
+authorized site
+  -> browser cookie jar
+  -> Cookie header + Referer
+  -> Native Messaging
+  -> StorDown Desktop
+  -> in-memory HTTP request headers
+  -> Multi-WAN download
+```
+
+The desktop accepts only a small header allowlist and rejects CR/LF injection. Browser authentication headers are used in memory for the captured transfer and are not written into the normal SQLite transfer-history record.
+
+If the site is not authorized, capture still works but no cookies are sent to StorDown.
 
 ## Development install
 
@@ -50,11 +71,10 @@ StorDown Desktop
 Persistent queue -> Multi-WAN engine
 ```
 
-The desktop capture listener binds only to loopback. It automatically uses the active physical Windows NIC IPv4 addresses and saves captured browser downloads in the user's Downloads folder with collision-safe filenames.
+The desktop capture listener binds only to loopback. It automatically uses the active physical Windows NIC IPv4 addresses and applies configured category/destination rules.
 
 ## Next browser milestone
 
-- secure cookie/header handoff for authenticated downloads;
 - per-site capture rules and exclusions;
 - packaged extension/native-host installer;
 - download-all-links support.

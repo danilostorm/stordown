@@ -111,3 +111,54 @@ button {
   font-size: 10px;
   line-height: 1.5;
 }
+
+
+.authCard {
+  margin-top: 10px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #283148;
+  border-radius: 12px;
+  background: #111725;
+}
+
+.authInfo {
+  min-width: 0;
+  flex: 1;
+}
+
+.authInfo strong,
+.authInfo span {
+  display: block;
+}
+
+#siteName {
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+#siteAuthStatus {
+  margin-top: 4px;
+  color: #8490a7;
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+#siteAuthStatus[data-state="ok"] {
+  color: #7ee0ab;
+}
+
+#siteAuthButton {
+  flex: 0 0 auto;
+  max-width: 105px;
+}
+
+#siteAuthButton:disabled {
+  opacity: .5;
+  cursor: default;
+}
