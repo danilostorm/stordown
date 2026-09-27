@@ -1213,6 +1213,34 @@ fn main() {
             app.manage(control_state.clone());
             app.manage(GoogleAuthState::default());
 
+            let restore_app = app.handle().clone();
+            let restore_store = store.clone();
+            let restore_queue = queue_state.clone();
+            let restore_controls = control_state.clone();
+
+            tauri::async_runtime::spawn(async move {
+                if let Ok(records) = restore_store.list_scheduled().await {
+                    for record in records {
+                        if record.direction != "download" || record.provider != "http" {
+                            continue;
+                        }
+
+                        let _ = spawn_download_execution(
+                            record.source,
+                            record.destination,
+                            record.connections,
+                            record.bind_ips,
+                            record.id,
+                            record.scheduled_at,
+                            restore_app.clone(),
+                            restore_queue.clone(),
+                            restore_controls.clone(),
+                            restore_store.clone(),
+                        );
+                    }
+                }
+            });
+
             start_browser_capture_server(
                 app.handle().clone(),
                 download_dir,
