@@ -30,6 +30,7 @@ The repository currently contains:
 - automatic download categories and extension-based destination rules;
 - persistent HTTP download scheduler with restart recovery;
 - adaptive Multi-WAN chunk scheduling with automatic link failover;
+- adaptive Google Drive batch assignment with resumable chunk failover;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -283,3 +284,23 @@ next waves
 If a segment request or stream fails on one interface, that link enters a short exponential cooldown and the unfinished Range is retried from the bytes already written using another healthy interface. A permanently bad path is probed less often while the remaining WAN continues carrying work.
 
 The adaptive scheduler supports more than two enabled local interfaces; the practical number of usable Internet paths still depends on the router and policy-based routing configuration.
+
+
+## Google Drive Smart Multi-WAN
+
+Google Drive batch uploads now share the same adaptive link pool used by the download engine.
+
+For a batch, StorDown limits the number of simultaneously active files, samples confirmed resumable chunks and continuously decides which local interface should carry the next chunk. Faster links receive more work while active-worker pressure prevents one WAN from monopolizing every file.
+
+If a Drive chunk fails because one WAN disappears, StorDown:
+
+```text
+failed chunk
+  -> marks that WAN unhealthy
+  -> puts it in exponential cooldown
+  -> queries the resumable session offset through another healthy WAN
+  -> keeps already confirmed bytes
+  -> retries the remaining chunk through another interface
+```
+
+A single Google Drive resumable file is still sequential at the provider protocol level, so switching WANs improves failover and adaptation but does not make one file upload through two WANs in parallel. Parallel striping of one large upload remains the job of the planned StorDown Relay.
