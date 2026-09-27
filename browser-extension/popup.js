@@ -97,7 +97,6 @@ async function toggleSiteAuthorization() {
 
   if (currentlyGranted && authorizedOrigins.includes(activeOrigin)) {
     await chrome.permissions.remove({
-      permissions: ["cookies"],
       origins: [activePattern],
     });
 
