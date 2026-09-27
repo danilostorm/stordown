@@ -30,7 +30,7 @@
 - [x] Pause / resume / cancel controls for active transfers
 - [x] Smart adaptive balancing for segmented HTTP downloads
 - [x] Automatic HTTP segment failover when one link disappears
-- [ ] File integrity verification
+- [x] Optional SHA-256 file integrity verification
 - [x] Windows file picker integration
 
 ## V0.3 - Browser integration
