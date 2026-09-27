@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use stordown_core::{
     authorize_google_drive_desktop, download_with_control, probe_links,
@@ -340,60 +340,66 @@ async fn current_google_access_token(state: &GoogleAuthState) -> Result<String, 
     Ok(session.access_token.clone())
 }
 
-async fn enqueue_download_job(
+fn now_epoch_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64
+}
+
+fn spawn_download_execution(
     url: String,
     output: String,
     connections: usize,
     bind_ips: Vec<String>,
     transfer_id: String,
+    scheduled_at: Option<i64>,
     app: AppHandle,
     queue_state: QueueState,
     control_state: TransferControlState,
     store: TransferStore,
-) -> Result<TransferRecord, String> {
-    let links = parse_links(bind_ips.clone())?;
-    let name = file_name_from_path(&output, "download");
-    let record = store
-        .insert(NewTransferRecord {
-            id: transfer_id.clone(),
-            direction: "download".to_string(),
-            name,
-            source: url.clone(),
-            destination: output.clone(),
-            provider: "http".to_string(),
-            connections,
-            bind_ips,
-        })
-        .await?;
-
-    let control = register_transfer(&transfer_id, &control_state).await;
-    let queue = queue_state.clone();
-    let controls = control_state.clone();
-    let task_store = store.clone();
-    let task_app = app.clone();
-
-    notify_transfer_list(&app, &transfer_id);
+) -> Result<(), String> {
+    let links = parse_links(bind_ips)?;
+    let control_state_for_task = control_state.clone();
 
     tauri::async_runtime::spawn(async move {
-        let permit = queue.slots.acquire_owned().await;
+        let control = register_transfer(&transfer_id, &control_state_for_task).await;
+
+        if let Some(start_at) = scheduled_at.filter(|value| *value > now_epoch_seconds()) {
+            let wait_seconds = start_at.saturating_sub(now_epoch_seconds()) as u64;
+            tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
+
+            if control.is_cancelled() {
+                let _ = store.update_status(&transfer_id, "cancelled", None).await;
+                notify_transfer_list(&app, &transfer_id);
+                remove_transfer(&transfer_id, &control_state_for_task).await;
+                return;
+            }
+
+            let _ = store.update_status(&transfer_id, "queued", None).await;
+            notify_transfer_list(&app, &transfer_id);
+        }
+
+        let permit = queue_state.slots.acquire_owned().await;
         if permit.is_err() {
-            let _ = task_store
+            let _ = store
                 .update_status(&transfer_id, "failed", Some("Fila indisponível"))
                 .await;
-            notify_transfer_list(&task_app, &transfer_id);
-            remove_transfer(&transfer_id, &controls).await;
+            notify_transfer_list(&app, &transfer_id);
+            remove_transfer(&transfer_id, &control_state_for_task).await;
             return;
         }
 
         if control.is_cancelled() {
-            let _ = task_store.update_status(&transfer_id, "cancelled", None).await;
-            notify_transfer_list(&task_app, &transfer_id);
-            remove_transfer(&transfer_id, &controls).await;
+            let _ = store.update_status(&transfer_id, "cancelled", None).await;
+            notify_transfer_list(&app, &transfer_id);
+            remove_transfer(&transfer_id, &control_state_for_task).await;
             return;
         }
 
-        let _ = task_store.update_status(&transfer_id, "running", None).await;
-        notify_transfer_list(&task_app, &transfer_id);
+        let _ = store.update_status(&transfer_id, "running", None).await;
+        notify_transfer_list(&app, &transfer_id);
 
         let result = download_with_control(
             DownloadRequest {
@@ -404,31 +410,79 @@ async fn enqueue_download_job(
                 headers: HashMap::new(),
             },
             transfer_id.clone(),
-            Some(progress_emitter(task_app.clone(), task_store.clone())),
+            Some(progress_emitter(app.clone(), store.clone())),
             Some(control.clone()),
         )
         .await;
 
         match result {
             Ok(result) => {
-                let _ = task_store
+                let _ = store
                     .complete(&transfer_id, result.bytes_written, Some(result.bytes_written))
                     .await;
             }
             Err(_) if control.is_cancelled() => {
-                let _ = task_store.update_status(&transfer_id, "cancelled", None).await;
+                let _ = store.update_status(&transfer_id, "cancelled", None).await;
             }
             Err(error) => {
                 let message = error.to_string();
-                let _ = task_store
+                let _ = store
                     .update_status(&transfer_id, "failed", Some(&message))
                     .await;
             }
         }
 
-        notify_transfer_list(&task_app, &transfer_id);
-        remove_transfer(&transfer_id, &controls).await;
+        notify_transfer_list(&app, &transfer_id);
+        remove_transfer(&transfer_id, &control_state_for_task).await;
     });
+
+    Ok(())
+}
+
+async fn enqueue_download_job(
+    url: String,
+    output: String,
+    connections: usize,
+    bind_ips: Vec<String>,
+    transfer_id: String,
+    scheduled_at: Option<i64>,
+    app: AppHandle,
+    queue_state: QueueState,
+    control_state: TransferControlState,
+    store: TransferStore,
+) -> Result<TransferRecord, String> {
+    parse_links(bind_ips.clone())?;
+    let name = file_name_from_path(&output, "download");
+    let normalized_schedule = scheduled_at.filter(|value| *value > now_epoch_seconds());
+
+    let record = store
+        .insert(NewTransferRecord {
+            id: transfer_id.clone(),
+            direction: "download".to_string(),
+            name,
+            source: url.clone(),
+            destination: output.clone(),
+            provider: "http".to_string(),
+            connections,
+            bind_ips: bind_ips.clone(),
+            scheduled_at: normalized_schedule,
+        })
+        .await?;
+
+    notify_transfer_list(&app, &transfer_id);
+
+    spawn_download_execution(
+        url,
+        output,
+        connections,
+        bind_ips,
+        transfer_id,
+        normalized_schedule,
+        app,
+        queue_state,
+        control_state,
+        store,
+    )?;
 
     Ok(record)
 }
@@ -440,6 +494,7 @@ async fn enqueue_download(
     connections: usize,
     bind_ips: Vec<String>,
     transfer_id: String,
+    scheduled_at: Option<i64>,
     app: AppHandle,
     queue_state: State<'_, QueueState>,
     control_state: State<'_, TransferControlState>,
@@ -451,6 +506,7 @@ async fn enqueue_download(
         connections,
         bind_ips,
         transfer_id,
+        scheduled_at,
         app,
         queue_state.inner().clone(),
         control_state.inner().clone(),
@@ -503,6 +559,7 @@ async fn enqueue_drive_upload(
             provider: "google_drive".to_string(),
             connections: files.len().max(1),
             bind_ips,
+            scheduled_at: None,
         })
         .await?;
 
@@ -860,6 +917,7 @@ async fn handle_browser_capture(
         8,
         bind_ips,
         transfer_id.clone(),
+        None,
         app.clone(),
         queue_state,
         control_state,
