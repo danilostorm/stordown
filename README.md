@@ -32,6 +32,7 @@ The repository currently contains:
 - persistent HTTP download scheduler with restart recovery;
 - adaptive Multi-WAN chunk scheduling with automatic link failover;
 - adaptive Google Drive batch assignment with resumable chunk failover;
+- optional SHA-256 integrity verification for completed HTTP downloads;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -314,3 +315,29 @@ The Chrome/Edge extension can now capture downloads that depend on an authentica
 The user authorizes an individual website from the extension popup. Only then does the extension read cookies for that origin and attach a controlled `Cookie` header plus the download referrer to the Native Messaging request.
 
 The desktop sanitizes incoming browser headers against an allowlist and keeps them in memory for the HTTP transfer rather than storing cookie values in the normal SQLite history.
+
+
+## SHA-256 integrity verification
+
+HTTP/HTTPS downloads can optionally be given an expected SHA-256 checksum.
+
+StorDown downloads the file normally, including Multi-WAN segmentation, resume and failover. After all parts are assembled, the final file is read once and hashed with SHA-256 before the transfer is marked complete.
+
+```text
+download -> assemble file -> SHA-256
+                         -> matches expected -> verified / completed
+                         -> mismatch         -> failed with expected + actual hash
+```
+
+The checksum is stored with the transfer metadata so a scheduled download still verifies correctly after StorDown restarts. Browser-captured downloads do not invent a checksum; they only verify when a future capture rule or source supplies one.
+
+CLI example:
+
+```powershell
+cargo run -p stordown-cli -- download "https://example.com/image.iso" `
+  --output "C:\Downloads\image.iso" `
+  --connections 8 `
+  --bind 192.168.30.101 `
+  --bind 192.168.30.102 `
+  --sha256 "64_HEX_CHARACTERS_HERE"
+```
