@@ -7,7 +7,7 @@ on:
 
 jobs:
   rust:
-    name: Rust core
+    name: Rust core + Windows backend
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,6 +16,8 @@ jobs:
         run: cargo check --workspace
       - name: Test workspace
         run: cargo test --workspace
+      - name: Check Tauri backend
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 
   frontend:
     name: Desktop frontend

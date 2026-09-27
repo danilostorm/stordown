@@ -16,7 +16,8 @@
 - [ ] Live transfer progress events
 - [ ] Pause/resume metadata persisted to disk
 - [ ] Retry individual failed download segments
-- [ ] Automatic NIC discovery on Windows
+- [x] Automatic physical NIC discovery on Windows
+- [x] Per-link WAN/public-IP route verification
 - [ ] Per-link throughput measurement
 
 ## V0.2 - Desktop transfer manager
