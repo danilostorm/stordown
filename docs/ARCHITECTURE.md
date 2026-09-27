@@ -1,6 +1,6 @@
 # StorDown Architecture
 
-StorDown is designed as a download manager with a native multi-link engine instead of relying on generic router load balancing.
+StorDown is a Windows transfer manager with a native multi-link engine. The router is responsible for deterministic WAN policy; StorDown is responsible for opening the right connections on the right local source IPs.
 
 ## Main components
 
@@ -14,11 +14,11 @@ StorDown Desktop (Tauri + React)
       v
 stordown-core (Rust)
       |
-      +-- HTTP/HTTPS probe
+      +-- HTTP/HTTPS downloads
       +-- HTTP Range segmentation
-      +-- retry/resume engine
+      +-- Google Drive resumable upload
       +-- per-link socket binding
-      +-- scheduler
+      +-- queue / scheduler
       +-- cloud provider adapters
       |
       +----------+----------+
@@ -30,13 +30,11 @@ Local IP / NIC 1       Local IP / NIC 2
 UDM PBR -> WAN1        UDM PBR -> WAN2
 ```
 
-## Multi-link model
+## Download multi-link model
 
 Each HTTP segment is assigned to a configured link. A link is identified by a local source IP.
 
-The Rust HTTP client is created with a local bind address. The UDM sees the two source IPs as separate clients and policy-based routing can send each one through a different WAN.
-
-Example:
+The Rust HTTP client binds to that IP. The UDM sees the source addresses separately and policy-based routing can send each one through a different WAN.
 
 ```text
 Segment 0 -> 192.168.30.101 -> WAN1
@@ -45,16 +43,59 @@ Segment 2 -> 192.168.30.101 -> WAN1
 Segment 3 -> 192.168.30.102 -> WAN2
 ```
 
-This works for a single large file when the origin supports byte-range requests.
+This can aggregate two WANs for one large download when the origin supports byte ranges.
+
+## Upload multi-link model
+
+Cloud upload protocols are not always symmetrical with downloads.
+
+For Google Drive, one resumable upload session advances sequentially through byte ranges. StorDown therefore uses two levels:
+
+```text
+Multiple files
+  file A -> NIC1 -> WAN1 -> Drive session A
+  file B -> NIC2 -> WAN2 -> Drive session B
+  file C -> NIC1 -> WAN1 -> Drive session C
+```
+
+This aggregates WAN bandwidth across a batch immediately.
+
+For one large file to consume two WANs simultaneously, the planned **StorDown Relay** mode uses independent paths from the PC to a relay and a single reconstructed stream from the relay to the cloud provider.
+
+```text
+One large file
+      |
+   +--+--+
+   |     |
+ WAN1   WAN2
+   \     /
+ StorDown Relay
+      |
+ Google Drive
+```
+
+Direct mode remains the default and does not require a relay.
 
 ## Fallback behavior
 
-If the origin does not support `Range: bytes=...`, StorDown falls back to a single connection for that file. Multiple independent files can still be distributed across links in a later scheduler milestone.
+If an HTTP origin does not support `Range: bytes=...`, StorDown falls back to a single connection for that file.
+
+Google Drive uploads use resumable chunks and retry/query the resumable session after ambiguous network failures.
 
 ## Cloud providers
 
-Google Drive will be implemented as a first-class provider using Drive APIs and OAuth. Rclone integration remains useful as an optional compatibility layer for additional remotes.
+Google Drive is the first first-class provider:
+
+- resumable uploads;
+- multiple-file WAN distribution;
+- Shared Drive-compatible session creation;
+- OAuth desktop flow planned next;
+- Drive downloads and shared links planned next.
+
+Rclone remains useful as an optional compatibility layer for additional remotes.
 
 ## Security boundary
 
-Browser authentication material should only be transferred when necessary and should be scoped to the requested origin. StorDown should never persist session cookies unless the user explicitly enables it.
+Browser authentication material should only be transferred when necessary and scoped to the requested origin.
+
+Google refresh tokens must be stored with Windows-protected credential storage. The current development-only access-token input will be removed from the normal interface after OAuth is wired.
