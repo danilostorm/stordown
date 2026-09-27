@@ -10,23 +10,27 @@
 - [x] CLI proof of concept
 - [x] Initial Tauri/React desktop UI
 - [x] Browser extension skeleton
-- [ ] Live progress events
-- [ ] Pause/resume metadata
-- [ ] Retry individual failed segments
+- [x] Google Drive resumable upload engine
+- [x] Batch Google Drive uploads distributed across multiple NICs
+- [x] Upload workspace in the desktop UI
+- [ ] Live transfer progress events
+- [ ] Pause/resume metadata persisted to disk
+- [ ] Retry individual failed download segments
 - [ ] Automatic NIC discovery on Windows
 - [ ] Per-link throughput measurement
 
-## V0.2 - Desktop download manager
+## V0.2 - Desktop transfer manager
 
-- [ ] Download queue
+- [ ] Unified download/upload queue
 - [ ] Categories and destination rules
 - [ ] Persistent history
 - [ ] Scheduler
 - [ ] Speed limits
-- [ ] Per-download connection controls
+- [ ] Per-transfer connection controls
 - [ ] Smart weighted balancing
 - [ ] Failover when one link disappears
 - [ ] File integrity verification
+- [ ] Windows file picker integration
 
 ## V0.3 - Browser integration
 
@@ -37,20 +41,32 @@
 - [ ] Download all links
 - [ ] Site-specific capture rules
 
-## V0.4 - Cloud
+## V0.4 - Google Drive
 
-- [ ] Google Drive OAuth
-- [ ] Shared Drive / shared links
+- [ ] OAuth desktop login
+- [ ] Secure refresh-token storage
+- [ ] Drive browser / destination picker
+- [ ] Shared Drive browsing
+- [ ] Shared links
 - [ ] Range-aware Drive downloads
+- [ ] Persist and resume Drive upload sessions after restart
 - [ ] Rclone remote adapter
-- [ ] OneDrive / Dropbox adapters
+
+## V0.5 - Multi-WAN upload acceleration
+
+- [ ] Smart per-file assignment across WANs
+- [ ] Per-WAN upload telemetry
+- [ ] Upload failover and reassignment
+- [ ] StorDown Relay protocol
+- [ ] One large upload striped across two or more WANs through Relay
+- [ ] Optional self-hosted Relay on VPS/Unraid
 
 ## Later
 
+- [ ] OneDrive / Dropbox adapters
 - [ ] Remote StorDown agent
 - [ ] Send downloads to another machine
-- [ ] Multi-WAN upload engine
 - [ ] Linux build
 - [ ] Firefox extension
 - [ ] 3+ simultaneous links
-- [ ] Optional QUIC/MPTCP relay mode for non-range traffic
+- [ ] Optional QUIC/MPTCP relay transport
