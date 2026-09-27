@@ -38,7 +38,7 @@
 - [x] Windows native-messaging host
 - [ ] One-click Chrome/Edge installer
 - [x] Automatic interception for direct HTTP/HTTPS downloads
-- [ ] Controlled cookie/header handoff
+- [x] Opt-in cookie/referrer/user-agent handoff for browser captures
 - [ ] Download all links
 - [ ] Site-specific capture rules
 
