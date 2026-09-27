@@ -46,6 +46,8 @@ struct BrowserCaptureRequest {
     url: Option<String>,
     filename: Option<String>,
     source: Option<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -343,6 +345,7 @@ async fn enqueue_download_job(
     output: String,
     connections: usize,
     bind_ips: Vec<String>,
+    headers: HashMap<String, String>,
     transfer_id: String,
     app: AppHandle,
     queue_state: QueueState,
@@ -399,7 +402,7 @@ async fn enqueue_download_job(
                 output: PathBuf::from(output),
                 connections,
                 links,
-                headers: HashMap::new(),
+                headers,
             },
             transfer_id.clone(),
             Some(progress_emitter(task_app.clone(), task_store.clone())),
@@ -448,6 +451,7 @@ async fn enqueue_download(
         output,
         connections,
         bind_ips,
+        HashMap::new(),
         transfer_id,
         app,
         queue_state.inner().clone(),
@@ -703,11 +707,11 @@ fn start_browser_capture_server(
                         status: None,
                         error: Some("Mensagem vazia do navegador".to_string()),
                     },
-                    Ok(_) if line.len() > 64 * 1024 => BrowserCaptureResponse {
+                    Ok(_) if line.len() > 256 * 1024 => BrowserCaptureResponse {
                         ok: false,
                         transfer_id: None,
                         status: None,
-                        error: Some("Mensagem do navegador excede 64 KiB".to_string()),
+                        error: Some("Mensagem do navegador excede 256 KiB".to_string()),
                     },
                     Ok(_) => match serde_json::from_str::<BrowserCaptureRequest>(&line) {
                         Ok(request) => {
@@ -829,6 +833,7 @@ async fn handle_browser_capture(
         output.to_string_lossy().to_string(),
         8,
         bind_ips,
+        filter_browser_headers(request.headers),
         transfer_id.clone(),
         app.clone(),
         queue_state,
@@ -861,6 +866,35 @@ async fn handle_browser_capture(
             error: Some(error),
         },
     }
+}
+
+fn filter_browser_headers(headers: HashMap<String, String>) -> HashMap<String, String> {
+    const MAX_HEADER_VALUE: usize = 32 * 1024;
+    const MAX_TOTAL_HEADERS: usize = 128 * 1024;
+
+    let mut filtered = HashMap::new();
+    let mut total = 0usize;
+
+    for (name, value) in headers {
+        let normalized = name.trim().to_ascii_lowercase();
+        let allowed = matches!(
+            normalized.as_str(),
+            "cookie" | "referer" | "user-agent" | "origin"
+        );
+
+        if !allowed || value.len() > MAX_HEADER_VALUE {
+            continue;
+        }
+
+        total = total.saturating_add(name.len()).saturating_add(value.len());
+        if total > MAX_TOTAL_HEADERS {
+            break;
+        }
+
+        filtered.insert(name, value);
+    }
+
+    filtered
 }
 
 fn browser_capture_filename(url: &str, provided: Option<&str>) -> String {
