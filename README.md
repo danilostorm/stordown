@@ -18,6 +18,8 @@ The repository currently contains:
 - Tauri + React desktop interface with Download and Upload workspaces;
 - Chrome/Edge Manifest V3 extension skeleton;
 - UDM Pro multi-WAN setup notes;
+- automatic discovery of active physical Windows NICs;
+- per-interface public-IP route tests to verify UDM WAN policies;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -116,3 +118,17 @@ docs/
 ```
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for planned milestones.
+
+
+## Network auto-detect
+
+The desktop app can now ask Windows for active **physical** network adapters and fill the StorDown bind-IP list automatically.
+
+The **Testar WANs** action opens one outbound request bound to each selected local IP. StorDown shows the public IP observed on each path, which makes it easy to confirm whether UDM policy-based routing is actually sending NIC1 and NIC2 through different WANs.
+
+```text
+Ethernet 1  192.168.x.x -> public IP A
+Ethernet 2  192.168.x.y -> public IP B
+```
+
+Different public IPs confirm that the two source interfaces are reaching the Internet through distinct egress paths.
