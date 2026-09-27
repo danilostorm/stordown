@@ -2,6 +2,7 @@ use crate::{
     adaptive::AdaptiveLinkPool,
     control::TransferControl,
     model::{LinkConfig, ProgressCallback, TransferProgress},
+    throttle::TransferThrottle,
 };
 use anyhow::{bail, Context, Result};
 use reqwest::{
@@ -39,6 +40,7 @@ pub struct GoogleDriveUploadRequest {
     pub remote_name: Option<String>,
     pub mime_type: Option<String>,
     pub chunk_size: u64,
+    pub max_bytes_per_second: Option<u64>,
 }
 
 impl GoogleDriveUploadRequest {
@@ -50,6 +52,7 @@ impl GoogleDriveUploadRequest {
             remote_name: None,
             mime_type: None,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            max_bytes_per_second: None,
         }
     }
 }
@@ -61,6 +64,7 @@ pub struct GoogleDriveBatchUploadRequest {
     pub parent_id: Option<String>,
     pub chunk_size: u64,
     pub links: Vec<LinkConfig>,
+    pub max_bytes_per_second: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,17 +116,21 @@ pub async fn upload_google_drive_file_with_control(
     transfer_id: String,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
+    throttle: TransferThrottle,
 ) -> Result<GoogleDriveUploadResult> {
     if !link.enabled {
         bail!("selected link {} is disabled", link.name);
     }
 
+    let throttle = TransferThrottle::new(request.max_bytes_per_second);
     upload_google_drive_file_with_pool(
         request,
         AdaptiveLinkPool::new(vec![link]),
+        throttle,
         transfer_id,
         progress,
         control,
+        throttle,
     )
     .await
 }
@@ -130,6 +138,7 @@ pub async fn upload_google_drive_file_with_control(
 async fn upload_google_drive_file_with_pool(
     request: GoogleDriveUploadRequest,
     pool: AdaptiveLinkPool,
+    throttle: TransferThrottle,
     transfer_id: String,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
@@ -249,6 +258,7 @@ pub async fn upload_google_drive_batch_with_control(
 
     let max_parallel = enabled_links.len().saturating_mul(2).clamp(1, 8);
     let pool = AdaptiveLinkPool::new(enabled_links);
+    let throttle = TransferThrottle::new(request.max_bytes_per_second);
     let mut pending: VecDeque<(usize, PathBuf)> =
         request.files.into_iter().enumerate().collect();
     let mut jobs: JoinSet<Result<(usize, GoogleDriveUploadResult)>> = JoinSet::new();
@@ -269,6 +279,7 @@ pub async fn upload_google_drive_batch_with_control(
             progress.clone(),
             control.clone(),
             pool.clone(),
+            throttle.clone(),
         );
     }
 
@@ -309,6 +320,7 @@ fn spawn_drive_upload_job(
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
     pool: AdaptiveLinkPool,
+    throttle: TransferThrottle,
 ) {
     jobs.spawn(async move {
         let result = upload_google_drive_file_with_pool(
@@ -319,8 +331,10 @@ fn spawn_drive_upload_job(
                 remote_name: None,
                 mime_type: None,
                 chunk_size,
+                max_bytes_per_second: None,
             },
             pool,
+            throttle,
             transfer_id,
             progress,
             control,
@@ -560,6 +574,8 @@ async fn upload_chunks_adaptive(
                     continue;
                 }
             };
+
+            throttle.consume(length).await;
 
             let response = client
                 .put(session_uri)
