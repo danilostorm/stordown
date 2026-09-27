@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod transfer_store;
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     env,
     net::IpAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::Arc,
     time::{Duration, Instant},
@@ -13,13 +15,14 @@ use std::{
 use stordown_core::{
     authorize_google_drive_desktop, download_with_control, probe_links,
     refresh_google_access_token, upload_google_drive_batch_with_control, DownloadRequest,
-    DownloadResult, GoogleDriveBatchUploadRequest, GoogleDriveUploadResult, LinkConfig,
-    LinkProbeStatus, ProgressCallback, TransferControl,
+    GoogleDriveBatchUploadRequest, LinkConfig, LinkProbeStatus, ProgressCallback, TransferControl,
 };
-use tauri::{AppHandle, Emitter, State};
-use tokio::sync::Mutex;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::{Mutex, Semaphore};
+use transfer_store::{NewTransferRecord, TransferRecord, TransferStore};
 
 const GOOGLE_KEYRING_SERVICE: &str = "StorDown Google Drive";
+const DEFAULT_QUEUE_CONCURRENCY: usize = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NetworkInterfaceInfo {
@@ -53,9 +56,9 @@ struct GoogleAuthStatus {
     expires_in_seconds: Option<u64>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TransferControlState {
-    controls: Mutex<HashMap<String, TransferControl>>,
+    controls: Arc<Mutex<HashMap<String, TransferControl>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +66,19 @@ struct TransferControlStatus {
     transfer_id: String,
     paused: bool,
     cancelled: bool,
+}
+
+#[derive(Clone)]
+struct QueueState {
+    slots: Arc<Semaphore>,
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            slots: Arc::new(Semaphore::new(DEFAULT_QUEUE_CONCURRENCY)),
+        }
+    }
 }
 
 async fn register_transfer(
@@ -95,10 +111,25 @@ async fn get_transfer_control(
         .ok_or_else(|| format!("Transferência não encontrada: {transfer_id}"))
 }
 
-fn progress_emitter(app: AppHandle) -> ProgressCallback {
+fn progress_emitter(app: AppHandle, store: TransferStore) -> ProgressCallback {
     Arc::new(move |progress| {
-        let _ = app.emit("transfer-progress", progress);
+        let _ = app.emit("transfer-progress", progress.clone());
+
+        let store = store.clone();
+        let transfer_id = progress.transfer_id.clone();
+        let bytes_transferred = progress.bytes_transferred;
+        let total_bytes = progress.total_bytes;
+
+        tauri::async_runtime::spawn(async move {
+            let _ = store
+                .update_progress(&transfer_id, bytes_transferred, total_bytes)
+                .await;
+        });
     })
+}
+
+fn notify_transfer_list(app: &AppHandle, transfer_id: &str) {
+    let _ = app.emit("transfer-list-changed", transfer_id.to_string());
 }
 
 fn parse_links(bind_ips: Vec<String>) -> Result<Vec<LinkConfig>, String> {
@@ -286,39 +317,102 @@ async fn current_google_access_token(state: &GoogleAuthState) -> Result<String, 
 }
 
 #[tauri::command]
-async fn start_download(
+async fn enqueue_download(
     url: String,
     output: String,
     connections: usize,
     bind_ips: Vec<String>,
     transfer_id: String,
     app: AppHandle,
+    queue_state: State<'_, QueueState>,
     control_state: State<'_, TransferControlState>,
-) -> Result<DownloadResult, String> {
-    let links = parse_links(bind_ips)?;
-    let control = register_transfer(&transfer_id, control_state.inner()).await;
-
-    let result = download_with_control(
-        DownloadRequest {
-            url,
-            output: PathBuf::from(output),
+    store: State<'_, TransferStore>,
+) -> Result<TransferRecord, String> {
+    let links = parse_links(bind_ips.clone())?;
+    let name = file_name_from_path(&output, "download");
+    let record = store
+        .insert(NewTransferRecord {
+            id: transfer_id.clone(),
+            direction: "download".to_string(),
+            name,
+            source: url.clone(),
+            destination: output.clone(),
+            provider: "http".to_string(),
             connections,
-            links,
-            headers: HashMap::new(),
-        },
-        transfer_id.clone(),
-        Some(progress_emitter(app)),
-        Some(control),
-    )
-    .await
-    .map_err(|error| error.to_string());
+            bind_ips,
+        })
+        .await?;
 
-    remove_transfer(&transfer_id, control_state.inner()).await;
-    result
+    let control = register_transfer(&transfer_id, control_state.inner()).await;
+    let queue = queue_state.inner().clone();
+    let controls = control_state.inner().clone();
+    let store = store.inner().clone();
+    let task_store = store.clone();
+    let task_app = app.clone();
+
+    notify_transfer_list(&app, &transfer_id);
+
+    tauri::async_runtime::spawn(async move {
+        let permit = queue.slots.acquire_owned().await;
+        if permit.is_err() {
+            let _ = task_store
+                .update_status(&transfer_id, "failed", Some("Fila indisponível"))
+                .await;
+            notify_transfer_list(&task_app, &transfer_id);
+            remove_transfer(&transfer_id, &controls).await;
+            return;
+        }
+
+        if control.is_cancelled() {
+            let _ = task_store.update_status(&transfer_id, "cancelled", None).await;
+            notify_transfer_list(&task_app, &transfer_id);
+            remove_transfer(&transfer_id, &controls).await;
+            return;
+        }
+
+        let _ = task_store.update_status(&transfer_id, "running", None).await;
+        notify_transfer_list(&task_app, &transfer_id);
+
+        let result = download_with_control(
+            DownloadRequest {
+                url,
+                output: PathBuf::from(output),
+                connections,
+                links,
+                headers: HashMap::new(),
+            },
+            transfer_id.clone(),
+            Some(progress_emitter(task_app.clone(), task_store.clone())),
+            Some(control.clone()),
+        )
+        .await;
+
+        match result {
+            Ok(result) => {
+                let _ = task_store
+                    .complete(&transfer_id, result.bytes_written, Some(result.bytes_written))
+                    .await;
+            }
+            Err(error) if control.is_cancelled() => {
+                let _ = task_store.update_status(&transfer_id, "cancelled", None).await;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let _ = task_store
+                    .update_status(&transfer_id, "failed", Some(&message))
+                    .await;
+            }
+        }
+
+        notify_transfer_list(&task_app, &transfer_id);
+        remove_transfer(&transfer_id, &controls).await;
+    });
+
+    Ok(record)
 }
 
 #[tauri::command]
-async fn start_drive_upload(
+async fn enqueue_drive_upload(
     files: Vec<String>,
     parent_id: Option<String>,
     bind_ips: Vec<String>,
@@ -326,44 +420,154 @@ async fn start_drive_upload(
     transfer_id: String,
     app: AppHandle,
     auth_state: State<'_, GoogleAuthState>,
+    queue_state: State<'_, QueueState>,
     control_state: State<'_, TransferControlState>,
-) -> Result<Vec<GoogleDriveUploadResult>, String> {
+    store: State<'_, TransferStore>,
+) -> Result<TransferRecord, String> {
     if files.is_empty() {
         return Err("Adicione pelo menos um arquivo para upload".to_string());
     }
 
+    let links = parse_links(bind_ips.clone())?;
     let access_token = current_google_access_token(auth_state.inner()).await?;
     let chunk_size = chunk_mib
         .checked_mul(1024 * 1024)
         .ok_or_else(|| "Tamanho de bloco inválido".to_string())?;
+
+    let name = if files.len() == 1 {
+        file_name_from_path(&files[0], "upload")
+    } else {
+        format!("{} arquivos para Google Drive", files.len())
+    };
+    let destination = parent_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("Google Drive / {value}"))
+        .unwrap_or_else(|| "Google Drive / Meu Drive".to_string());
+
+    let record = store
+        .insert(NewTransferRecord {
+            id: transfer_id.clone(),
+            direction: "upload".to_string(),
+            name,
+            source: files.join("\n"),
+            destination,
+            provider: "google_drive".to_string(),
+            connections: files.len().max(1),
+            bind_ips,
+        })
+        .await?;
+
     let control = register_transfer(&transfer_id, control_state.inner()).await;
+    let queue = queue_state.inner().clone();
+    let controls = control_state.inner().clone();
+    let task_store = store.inner().clone();
+    let task_app = app.clone();
 
-    let result = upload_google_drive_batch_with_control(
-        GoogleDriveBatchUploadRequest {
-            files: files.into_iter().map(PathBuf::from).collect(),
-            access_token,
-            parent_id: parent_id.filter(|value| !value.trim().is_empty()),
-            chunk_size,
-            links: parse_links(bind_ips)?,
-        },
-        transfer_id.clone(),
-        Some(progress_emitter(app)),
-        Some(control),
-    )
-    .await
-    .map_err(|error| error.to_string());
+    notify_transfer_list(&app, &transfer_id);
 
-    remove_transfer(&transfer_id, control_state.inner()).await;
-    result
+    tauri::async_runtime::spawn(async move {
+        let permit = queue.slots.acquire_owned().await;
+        if permit.is_err() {
+            let _ = task_store
+                .update_status(&transfer_id, "failed", Some("Fila indisponível"))
+                .await;
+            notify_transfer_list(&task_app, &transfer_id);
+            remove_transfer(&transfer_id, &controls).await;
+            return;
+        }
+
+        if control.is_cancelled() {
+            let _ = task_store.update_status(&transfer_id, "cancelled", None).await;
+            notify_transfer_list(&task_app, &transfer_id);
+            remove_transfer(&transfer_id, &controls).await;
+            return;
+        }
+
+        let _ = task_store.update_status(&transfer_id, "running", None).await;
+        notify_transfer_list(&task_app, &transfer_id);
+
+        let result = upload_google_drive_batch_with_control(
+            GoogleDriveBatchUploadRequest {
+                files: files.into_iter().map(PathBuf::from).collect(),
+                access_token,
+                parent_id: parent_id.filter(|value| !value.trim().is_empty()),
+                chunk_size,
+                links,
+            },
+            transfer_id.clone(),
+            Some(progress_emitter(task_app.clone(), task_store.clone())),
+            Some(control.clone()),
+        )
+        .await;
+
+        match result {
+            Ok(results) => {
+                let total = results.iter().map(|item| item.bytes_uploaded).sum();
+                let _ = task_store.complete(&transfer_id, total, Some(total)).await;
+            }
+            Err(_) if control.is_cancelled() => {
+                let _ = task_store.update_status(&transfer_id, "cancelled", None).await;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let _ = task_store
+                    .update_status(&transfer_id, "failed", Some(&message))
+                    .await;
+            }
+        }
+
+        notify_transfer_list(&task_app, &transfer_id);
+        remove_transfer(&transfer_id, &controls).await;
+    });
+
+    Ok(record)
+}
+
+#[tauri::command]
+async fn list_transfers(
+    limit: Option<usize>,
+    store: State<'_, TransferStore>,
+) -> Result<Vec<TransferRecord>, String> {
+    store.list(limit.unwrap_or(250).clamp(1, 1000)).await
+}
+
+#[tauri::command]
+async fn delete_transfer_history(
+    transfer_id: String,
+    control_state: State<'_, TransferControlState>,
+    store: State<'_, TransferStore>,
+) -> Result<(), String> {
+    if control_state
+        .controls
+        .lock()
+        .await
+        .contains_key(&transfer_id)
+    {
+        return Err("Pare ou conclua a transferência antes de removê-la do histórico".to_string());
+    }
+
+    store.delete(&transfer_id).await
+}
+
+#[tauri::command]
+async fn clear_finished_history(
+    store: State<'_, TransferStore>,
+) -> Result<usize, String> {
+    store.clear_finished().await
 }
 
 #[tauri::command]
 async fn pause_transfer(
     transfer_id: String,
     state: State<'_, TransferControlState>,
+    store: State<'_, TransferStore>,
+    app: AppHandle,
 ) -> Result<TransferControlStatus, String> {
     let control = get_transfer_control(&transfer_id, state.inner()).await?;
     control.pause();
+    store.update_status(&transfer_id, "paused", None).await?;
+    notify_transfer_list(&app, &transfer_id);
 
     Ok(TransferControlStatus {
         transfer_id,
@@ -376,9 +580,13 @@ async fn pause_transfer(
 async fn resume_transfer(
     transfer_id: String,
     state: State<'_, TransferControlState>,
+    store: State<'_, TransferStore>,
+    app: AppHandle,
 ) -> Result<TransferControlStatus, String> {
     let control = get_transfer_control(&transfer_id, state.inner()).await?;
     control.resume();
+    store.update_status(&transfer_id, "running", None).await?;
+    notify_transfer_list(&app, &transfer_id);
 
     Ok(TransferControlStatus {
         transfer_id,
@@ -391,9 +599,13 @@ async fn resume_transfer(
 async fn cancel_transfer(
     transfer_id: String,
     state: State<'_, TransferControlState>,
+    store: State<'_, TransferStore>,
+    app: AppHandle,
 ) -> Result<TransferControlStatus, String> {
     let control = get_transfer_control(&transfer_id, state.inner()).await?;
     control.cancel();
+    store.update_status(&transfer_id, "cancelled", None).await?;
+    notify_transfer_list(&app, &transfer_id);
 
     Ok(TransferControlStatus {
         transfer_id,
@@ -410,6 +622,15 @@ async fn test_routes(bind_ips: Vec<String>) -> Result<Vec<LinkProbeStatus>, Stri
 #[tauri::command]
 fn list_network_interfaces() -> Result<Vec<NetworkInterfaceInfo>, String> {
     discover_windows_interfaces()
+}
+
+fn file_name_from_path(raw: &str, fallback: &str) -> String {
+    Path::new(raw)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -470,11 +691,26 @@ fn discover_windows_interfaces() -> Result<Vec<NetworkInterfaceInfo>, String> {
 
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            let app_data = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Falha ao localizar AppData do StorDown: {error}"))?;
+            let store = TransferStore::open(&app_data.join("stordown.sqlite3"))
+                .map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
+
+            app.manage(store);
+            Ok(())
+        })
         .manage(GoogleAuthState::default())
         .manage(TransferControlState::default())
+        .manage(QueueState::default())
         .invoke_handler(tauri::generate_handler![
-            start_download,
-            start_drive_upload,
+            enqueue_download,
+            enqueue_drive_upload,
+            list_transfers,
+            delete_transfer_history,
+            clear_finished_history,
             pause_transfer,
             resume_transfer,
             cancel_transfer,
