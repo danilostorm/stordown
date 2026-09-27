@@ -1,12 +1,12 @@
 use crate::model::{DownloadRequest, DownloadResult, LinkConfig, ProbeResult};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::{
     header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     Client, StatusCode,
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     net::IpAddr,
     path::{Path, PathBuf},
 };
@@ -17,33 +17,7 @@ use tokio::{
 };
 
 pub async fn probe(url: &str) -> Result<ProbeResult> {
-    let client = Client::builder().build()?;
-    let response = client.head(url).send().await?;
-
-    let size = response
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok());
-
-    let accepts_ranges = response
-        .headers()
-        .get(ACCEPT_RANGES)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("bytes"))
-        .unwrap_or(false);
-
-    let content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-
-    Ok(ProbeResult {
-        size,
-        accepts_ranges,
-        content_type,
-    })
+    probe_url(url, &HashMap::new()).await
 }
 
 pub async fn download(request: DownloadRequest) -> Result<DownloadResult> {
@@ -62,60 +36,105 @@ pub async fn download(request: DownloadRequest) -> Result<DownloadResult> {
         bail!("at least one enabled network link is required");
     }
 
-    let metadata = probe_with_request_headers(&request).await?;
+    let metadata = probe_url(&request.url, &request.headers).await?;
 
     if metadata.accepts_ranges {
         if let Some(size) = metadata.size {
-            return download_segmented(request, links, size).await;
+            if size > 0 {
+                return download_segmented(request, links, size).await;
+            }
         }
     }
 
     download_single(request, &links[0]).await
 }
 
-async fn probe_with_request_headers(request: &DownloadRequest) -> Result<ProbeResult> {
+async fn probe_url(url: &str, headers: &HashMap<String, String>) -> Result<ProbeResult> {
     let client = Client::builder().build()?;
-    let mut req = client.head(&request.url);
-    for (key, value) in &request.headers {
-        req = req.header(key, value);
+
+    if let Ok(response) = request_with_headers(client.head(url), headers).send().await {
+        if response.status().is_success() {
+            let head_probe = probe_from_headers(response.headers(), false);
+
+            if head_probe.accepts_ranges && head_probe.size.is_some() {
+                return Ok(head_probe);
+            }
+        }
     }
 
-    let response = req.send().await?;
-    let size = response
-        .headers()
+    // Many CDNs omit Accept-Ranges on HEAD even though byte ranges work.
+    // A one-byte request is a more reliable capability probe.
+    let response = request_with_headers(client.get(url).header(RANGE, "bytes=0-0"), headers)
+        .send()
+        .await?;
+
+    if response.status() == StatusCode::PARTIAL_CONTENT {
+        let mut probe = probe_from_headers(response.headers(), true);
+
+        if probe.size.is_none() {
+            probe.size = response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(total_from_content_range);
+        }
+
+        return Ok(probe);
+    }
+
+    let mut probe = probe_from_headers(response.headers(), false);
+    probe.accepts_ranges = false;
+    Ok(probe)
+}
+
+fn probe_from_headers(headers: &reqwest::header::HeaderMap, partial: bool) -> ProbeResult {
+    let size = headers
         .get(CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
 
-    let accepts_ranges = response
-        .headers()
-        .get(ACCEPT_RANGES)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("bytes"))
-        .unwrap_or(false);
+    let accepts_ranges = partial
+        || headers
+            .get(ACCEPT_RANGES)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("bytes"))
+            .unwrap_or(false);
 
-    let content_type = response
-        .headers()
+    let content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
 
-    Ok(ProbeResult {
+    ProbeResult {
         size,
         accepts_ranges,
         content_type,
-    })
+    }
+}
+
+fn total_from_content_range(value: &str) -> Option<u64> {
+    let (_, total) = value.rsplit_once('/')?;
+    if total == "*" {
+        return None;
+    }
+    total.parse().ok()
+}
+
+fn request_with_headers(
+    mut builder: reqwest::RequestBuilder,
+    headers: &HashMap<String, String>,
+) -> reqwest::RequestBuilder {
+    for (key, value) in headers {
+        builder = builder.header(key.as_str(), value.as_str());
+    }
+    builder
 }
 
 async fn download_single(request: DownloadRequest, link: &LinkConfig) -> Result<DownloadResult> {
     ensure_parent(&request.output).await?;
 
     let client = client_for(link.local_ip)?;
-    let mut req = client.get(&request.url);
-    for (key, value) in &request.headers {
-        req = req.header(key, value);
-    }
-
+    let req = request_with_headers(client.get(&request.url), &request.headers);
     let response = req.send().await?.error_for_status()?;
     let mut stream = response.bytes_stream();
     let mut file = File::create(&request.output).await?;
@@ -191,7 +210,7 @@ async fn download_segmented(
 
 async fn download_range(
     url: &str,
-    headers: &std::collections::HashMap<String, String>,
+    headers: &HashMap<String, String>,
     part_path: &Path,
     start: u64,
     end: u64,
@@ -199,11 +218,10 @@ async fn download_range(
 ) -> Result<u64> {
     let expected = end - start + 1;
     let client = client_for(link.local_ip)?;
-    let mut req = client.get(url).header(RANGE, format!("bytes={start}-{end}"));
-
-    for (key, value) in headers {
-        req = req.header(key, value);
-    }
+    let req = request_with_headers(
+        client.get(url).header(RANGE, format!("bytes={start}-{end}")),
+        headers,
+    );
 
     let response = req.send().await?;
 
@@ -325,7 +343,7 @@ async fn assemble_parts(part_dir: &Path, output: &Path, segments: usize) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::segment_bounds;
+    use super::{segment_bounds, total_from_content_range};
 
     #[test]
     fn segment_bounds_cover_entire_file_without_overlap() {
@@ -334,5 +352,11 @@ mod tests {
         assert_eq!(segment_bounds(size, segments, 0), (0, 3));
         assert_eq!(segment_bounds(size, segments, 1), (4, 6));
         assert_eq!(segment_bounds(size, segments, 2), (7, 9));
+    }
+
+    #[test]
+    fn parses_total_size_from_content_range() {
+        assert_eq!(total_from_content_range("bytes 0-0/12345"), Some(12345));
+        assert_eq!(total_from_content_range("bytes 0-0/*"), None);
     }
 }
