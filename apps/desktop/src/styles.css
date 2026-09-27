@@ -108,3 +108,54 @@ input:focus, textarea:focus, select:focus {
 }
 .notice strong { font-size: 13px; }
 .notice span { color: #8f9ab1; font-size: 12px; line-height: 1.5; }
+
+.networkLink + .networkLink {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid #1d2637;
+}
+
+.linkRow i.bad {
+  background: #ff6b7a;
+  box-shadow: 0 0 12px rgba(255, 107, 122, .65);
+}
+
+.linkMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  padding-left: 15px;
+  margin-top: 4px;
+  color: #738099;
+  font-size: 10px;
+}
+
+.errorText { color: #ff7f8c; }
+
+.networkActions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.networkActions button {
+  border: 1px solid #293247;
+  border-radius: 9px;
+  padding: 8px 7px;
+  background: #151b29;
+  color: #b9c3d8;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.networkActions button:hover:not(:disabled) {
+  border-color: #5060b8;
+  color: white;
+}
+
+.networkActions button:disabled {
+  opacity: .5;
+  cursor: default;
+}
