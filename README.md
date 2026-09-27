@@ -28,6 +28,7 @@ The repository currently contains:
 - native Windows save/open dialogs for download destinations and upload file selection;
 - Chrome/Edge native-messaging bridge with context-menu and beta automatic capture;
 - automatic download categories and extension-based destination rules;
+- persistent HTTP download scheduler with restart recovery;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -240,3 +241,23 @@ Arquivos   zip, rar, 7z   -> D:\Downloads\Compactados
 When Chrome/Edge captures a direct download, StorDown derives the filename, checks enabled rules in priority order, creates the destination folder if necessary, generates a collision-safe filename and then adds the transfer to the normal persistent queue.
 
 If no rule matches, the normal Windows Downloads folder remains the fallback.
+
+
+## Persistent download scheduler
+
+HTTP/HTTPS downloads can now be scheduled directly from the desktop Download screen.
+
+When a future date/time is selected, StorDown stores the transfer with status `scheduled` and its start timestamp in SQLite. The scheduler waits until that time before consuming a normal queue slot.
+
+Scheduled HTTP downloads survive a StorDown restart:
+
+```text
+schedule -> SQLite -> close StorDown
+                    -> open StorDown
+                    -> restore scheduled jobs
+                    -> wait until target time
+                    -> queued
+                    -> running
+```
+
+The Agendador screen lists pending scheduled downloads and allows cancellation before they start. Browser-captured downloads still start immediately unless a later browser scheduling workflow is added.
