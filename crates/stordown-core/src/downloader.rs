@@ -349,6 +349,7 @@ async fn download_segmented(
                 progress.clone(),
                 control.clone(),
                 pool.clone(),
+                throttle.clone(),
             );
             next_index += 1;
         }
