@@ -27,6 +27,7 @@ The repository currently contains:
 - persistent SQLite transfer history in the StorDown app-data folder;
 - native Windows save/open dialogs for download destinations and upload file selection;
 - Chrome/Edge native-messaging bridge with context-menu and beta automatic capture;
+- automatic download categories and extension-based destination rules;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -214,3 +215,28 @@ Browser extension
 The browser copy is cancelled only after the desktop returns an acknowledgement that the transfer entered the StorDown queue. If StorDown is not running or the native host is unavailable, the browser download is left alone.
 
 See [browser-extension/README.md](browser-extension/README.md) for development installation and native-host registration.
+
+
+## Download categories and destination rules
+
+StorDown can now organize downloads captured by the browser before they enter the transfer queue.
+
+Rules are stored in the local SQLite database and contain:
+
+- a category name;
+- one or more file extensions;
+- a destination folder;
+- enabled/disabled state;
+- priority.
+
+Example:
+
+```text
+Vídeos     mkv, mp4, avi  -> C:\Downloads\Vídeos
+Imagens    jpg, png, webp -> C:\Downloads\Imagens
+Arquivos   zip, rar, 7z   -> D:\Downloads\Compactados
+```
+
+When Chrome/Edge captures a direct download, StorDown derives the filename, checks enabled rules in priority order, creates the destination folder if necessary, generates a collision-safe filename and then adds the transfer to the normal persistent queue.
+
+If no rule matches, the normal Windows Downloads folder remains the fallback.
