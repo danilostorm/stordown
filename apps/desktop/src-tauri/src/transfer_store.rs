@@ -28,6 +28,7 @@ pub struct TransferRecord {
     pub created_at: i64,
     pub updated_at: i64,
     pub scheduled_at: Option<i64>,
+    pub expected_sha256: Option<String>,
     pub error: Option<String>,
 }
 
@@ -42,6 +43,7 @@ pub struct NewTransferRecord {
     pub connections: usize,
     pub bind_ips: Vec<String>,
     pub scheduled_at: Option<i64>,
+    pub expected_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +102,7 @@ impl TransferStore {
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     scheduled_at INTEGER,
+                    expected_sha256 TEXT,
                     error TEXT
                 );
 
@@ -127,6 +130,7 @@ impl TransferStore {
             .map_err(|error| format!("Falha ao preparar banco StorDown: {error}"))?;
 
         ensure_column(&connection, "transfers", "scheduled_at", "INTEGER")?;
+        ensure_column(&connection, "transfers", "expected_sha256", "TEXT")?;
 
         connection
             .execute(
@@ -165,6 +169,7 @@ impl TransferStore {
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     scheduled_at INTEGER,
+                    expected_sha256 TEXT,
                     error TEXT
                 );
 
@@ -201,8 +206,8 @@ impl TransferStore {
                 "INSERT INTO transfers (
                     id, direction, name, source, destination, provider, status,
                     bytes_transferred, total_bytes, connections, bind_ips_json,
-                    created_at, updated_at, scheduled_at, error
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, NULL, ?8, ?9, ?10, ?11, ?12, NULL)",
+                    created_at, updated_at, scheduled_at, expected_sha256, error
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, NULL, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
                 params![
                     record.id,
                     record.direction,
@@ -216,6 +221,7 @@ impl TransferStore {
                     now,
                     now,
                     scheduled_at,
+                    record.expected_sha256,
                 ],
             )
             .map_err(|error| format!("Falha ao adicionar transferência à fila: {error}"))?;
@@ -232,7 +238,7 @@ impl TransferStore {
             .prepare(
                 "SELECT id, direction, name, source, destination, provider, status,
                         bytes_transferred, total_bytes, connections, bind_ips_json,
-                        created_at, updated_at, scheduled_at, error
+                        created_at, updated_at, scheduled_at, expected_sha256, error
                  FROM transfers
                  WHERE id = ?1",
             )
@@ -250,7 +256,7 @@ impl TransferStore {
             .prepare(
                 "SELECT id, direction, name, source, destination, provider, status,
                         bytes_transferred, total_bytes, connections, bind_ips_json,
-                        created_at, updated_at, scheduled_at, error
+                        created_at, updated_at, scheduled_at, expected_sha256, error
                  FROM transfers
                  ORDER BY
                     CASE status
@@ -372,7 +378,7 @@ impl TransferStore {
             .prepare(
                 "SELECT id, direction, name, source, destination, provider, status,
                         bytes_transferred, total_bytes, connections, bind_ips_json,
-                        created_at, updated_at, scheduled_at, error
+                        created_at, updated_at, scheduled_at, expected_sha256, error
                  FROM transfers
                  WHERE status = 'scheduled' AND scheduled_at IS NOT NULL
                  ORDER BY scheduled_at ASC",
@@ -579,6 +585,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRecord> {
     let total: Option<i64> = row.get(8)?;
     let connections: i64 = row.get(9)?;
     let scheduled_at: Option<i64> = row.get(13)?;
+    let expected_sha256: Option<String> = row.get(14)?;
 
     Ok(TransferRecord {
         id: row.get(0)?,
@@ -595,7 +602,8 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferRecord> {
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
         scheduled_at,
-        error: row.get(14)?,
+        expected_sha256,
+        error: row.get(15)?,
     })
 }
 
@@ -658,6 +666,7 @@ mod tests {
                 connections: 8,
                 bind_ips: vec!["192.168.1.10".to_string(), "192.168.1.11".to_string()],
                 scheduled_at: None,
+                expected_sha256: Some("a".repeat(64)),
             })
             .await
             .unwrap();
@@ -674,5 +683,9 @@ mod tests {
         assert_eq!(record.bytes_transferred, 1024);
         assert_eq!(record.total_bytes, Some(1024));
         assert_eq!(record.bind_ips.len(), 2);
+        assert_eq!(
+            record.expected_sha256.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
     }
 }
