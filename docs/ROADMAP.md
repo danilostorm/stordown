@@ -22,9 +22,9 @@
 
 ## V0.2 - Desktop transfer manager
 
-- [ ] Unified download/upload queue
+- [x] Unified download/upload queue
 - [ ] Categories and destination rules
-- [ ] Persistent history
+- [x] Persistent SQLite history
 - [ ] Scheduler
 - [ ] Speed limits
 - [x] Pause / resume / cancel controls for active transfers
