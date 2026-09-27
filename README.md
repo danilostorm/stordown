@@ -25,6 +25,7 @@ The repository currently contains:
 - persistent segmented HTTP download parts with automatic retry/resume;
 - unified download/upload queue with up to two simultaneous jobs;
 - persistent SQLite transfer history in the StorDown app-data folder;
+- native Windows save/open dialogs for download destinations and upload file selection;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -181,3 +182,13 @@ Transfer metadata is stored in a local SQLite database under the StorDown applic
 - timestamps and last error.
 
 On application startup, transfers that were left as running or paused are marked as **interrupted** so the UI never pretends that a dead process is still active. Completed, failed and cancelled entries remain visible in the history until the user removes them.
+
+
+## Windows file selection
+
+The desktop UI now uses native Windows dialogs instead of requiring users to type every path manually.
+
+- **Downloads:** `Procurar…` opens a Save dialog and suggests a filename derived from the URL when possible.
+- **Google Drive uploads:** `Selecionar arquivos…` opens the Windows multi-file picker and fills the upload batch automatically.
+
+Manual path editing remains available for advanced workflows and scripting-style use.

@@ -31,7 +31,7 @@
 - [ ] Smart weighted balancing
 - [ ] Failover when one link disappears
 - [ ] File integrity verification
-- [ ] Windows file picker integration
+- [x] Windows file picker integration
 
 ## V0.3 - Browser integration
 
