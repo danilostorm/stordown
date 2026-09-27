@@ -159,3 +159,57 @@ input:focus, textarea:focus, select:focus {
   opacity: .5;
   cursor: default;
 }
+
+
+.driveAuthCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid #28334a;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #111827, #101521);
+}
+
+.driveAuthCard > div:first-child {
+  display: grid;
+  gap: 5px;
+}
+
+.driveAuthLabel {
+  color: #7f8cff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .12em;
+}
+
+.driveAuthCard strong { font-size: 14px; }
+.driveAuthCard small { color: #8390a9; font-size: 11px; line-height: 1.45; }
+
+.driveAuthActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.driveAuthActions button {
+  border: 1px solid #34405a;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #172033;
+  color: #eef1ff;
+  font-weight: 750;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.driveAuthActions button:hover:not(:disabled) {
+  border-color: #6476ff;
+}
+
+.driveAuthActions button:disabled {
+  opacity: .55;
+  cursor: default;
+}
