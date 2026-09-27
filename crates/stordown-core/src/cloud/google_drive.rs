@@ -116,7 +116,6 @@ pub async fn upload_google_drive_file_with_control(
     transfer_id: String,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
-    throttle: TransferThrottle,
 ) -> Result<GoogleDriveUploadResult> {
     if !link.enabled {
         bail!("selected link {} is disabled", link.name);
@@ -300,6 +299,7 @@ pub async fn upload_google_drive_batch_with_control(
                 progress.clone(),
                 control.clone(),
                 pool.clone(),
+                throttle.clone(),
             );
         }
     }
@@ -522,6 +522,7 @@ async fn upload_chunks_adaptive(
     transfer_id: &str,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
+    throttle: TransferThrottle,
 ) -> Result<GoogleDriveUploadResult> {
     let mut file = File::open(source).await?;
     let mut offset = 0u64;
