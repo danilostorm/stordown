@@ -342,6 +342,18 @@ async fn current_google_access_token(state: &GoogleAuthState) -> Result<String, 
     Ok(session.access_token.clone())
 }
 
+fn normalize_sha256_input(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(|value| value.trim().to_ascii_lowercase()).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    if value.len() != 64 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("SHA-256 deve conter exatamente 64 caracteres hexadecimais".to_string());
+    }
+
+    Ok(Some(value))
+}
+
 fn now_epoch_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -356,6 +368,7 @@ fn spawn_download_execution(
     connections: usize,
     bind_ips: Vec<String>,
     headers: HashMap<String, String>,
+    expected_sha256: Option<String>,
     transfer_id: String,
     scheduled_at: Option<i64>,
     app: AppHandle,
@@ -411,6 +424,7 @@ fn spawn_download_execution(
                 connections,
                 links,
                 headers,
+                expected_sha256,
             },
             transfer_id.clone(),
             Some(progress_emitter(app.clone(), store.clone())),
@@ -458,6 +472,7 @@ async fn enqueue_download_job(
     parse_links(bind_ips.clone())?;
     let name = file_name_from_path(&output, "download");
     let normalized_schedule = scheduled_at.filter(|value| *value > now_epoch_seconds());
+    let expected_sha256 = normalize_sha256_input(expected_sha256)?;
 
     let record = store
         .insert(NewTransferRecord {
@@ -470,6 +485,7 @@ async fn enqueue_download_job(
             connections,
             bind_ips: bind_ips.clone(),
             scheduled_at: normalized_schedule,
+            expected_sha256: expected_sha256.clone(),
         })
         .await?;
 
@@ -481,6 +497,7 @@ async fn enqueue_download_job(
         connections,
         bind_ips,
         headers,
+        expected_sha256,
         transfer_id,
         normalized_schedule,
         app,
@@ -498,6 +515,7 @@ async fn enqueue_download(
     output: String,
     connections: usize,
     bind_ips: Vec<String>,
+    expected_sha256: Option<String>,
     transfer_id: String,
     scheduled_at: Option<i64>,
     app: AppHandle,
@@ -511,6 +529,7 @@ async fn enqueue_download(
         connections,
         bind_ips,
         HashMap::new(),
+        expected_sha256,
         transfer_id,
         scheduled_at,
         app,
@@ -566,6 +585,7 @@ async fn enqueue_drive_upload(
             connections: files.len().max(1),
             bind_ips,
             scheduled_at: None,
+            expected_sha256: None,
         })
         .await?;
 
@@ -925,6 +945,7 @@ async fn handle_browser_capture(
         8,
         bind_ips,
         auth_headers,
+        None,
         transfer_id.clone(),
         None,
         app.clone(),
@@ -1264,6 +1285,7 @@ fn main() {
                             record.connections,
                             record.bind_ips,
                             HashMap::new(),
+                            record.expected_sha256,
                             record.id,
                             record.scheduled_at,
                             restore_app.clone(),
