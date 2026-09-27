@@ -5,9 +5,12 @@ pub mod network;
 
 pub use cloud::{
     authorize_google_drive_desktop, refresh_google_access_token, upload_google_drive_batch,
-    upload_google_drive_file, GoogleDriveBatchUploadRequest, GoogleDriveUploadRequest,
-    GoogleDriveUploadResult, GoogleOAuthTokens, DRIVE_FILE_SCOPE,
+    upload_google_drive_batch_with_progress, upload_google_drive_file,
+    upload_google_drive_file_with_progress, GoogleDriveBatchUploadRequest,
+    GoogleDriveUploadRequest, GoogleDriveUploadResult, GoogleOAuthTokens, DRIVE_FILE_SCOPE,
 };
-pub use downloader::{download, probe};
-pub use model::{DownloadRequest, DownloadResult, LinkConfig, ProbeResult};
+pub use downloader::{download, download_with_progress, probe};
+pub use model::{
+    DownloadRequest, DownloadResult, LinkConfig, ProbeResult, ProgressCallback, TransferProgress,
+};
 pub use network::{probe_link, probe_links, LinkProbeResult, LinkProbeStatus};
