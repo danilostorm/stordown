@@ -17,21 +17,24 @@ Google requires non-final resumable chunks to use sizes that are multiples of 25
 
 ## Authentication
 
-The desktop application will use OAuth 2.0 with a Google **Desktop app** client.
-
-The intended production UX is:
+The Windows desktop application now implements the installed-app OAuth flow with **PKCE** and a local loopback callback.
 
 ```text
 StorDown
   -> Conectar Google Drive
-  -> browser consent
-  -> callback to StorDown
-  -> refresh token stored with Windows-protected storage
+  -> default system browser
+  -> Google consent
+  -> http://127.0.0.1:<random-port>
+  -> authorization code + state validation
+  -> token exchange with PKCE verifier
+  -> refresh token stored in Windows secure credential storage
 ```
 
-During development, the backend upload command accepts an access token directly. This is temporary and will be removed from the normal UI once OAuth is wired.
+The normal desktop upload flow no longer requires users to paste an access token. StorDown refreshes an expired access token from the saved refresh token.
 
-StorDown should request the narrowest Drive scope that supports the selected workflow. Broader Drive-wide access should only be added if a feature actually requires it.
+For development, the Google Desktop OAuth client ID can be supplied in the UI or through `STORDOWN_GOOGLE_CLIENT_ID`. The distributed application will ship with the project's public client ID configured. Installed applications cannot treat a client secret as confidential, so the flow does not depend on embedding one.
+
+StorDown currently requests `https://www.googleapis.com/auth/drive.file`, keeping access narrower than full Drive-wide authorization. Broader scopes should only be introduced for features that truly require them.
 
 ## Multi-WAN behavior
 
