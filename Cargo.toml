@@ -2,7 +2,8 @@
 members = [
   "crates/stordown-core",
   "apps/cli",
-  "apps/desktop/src-tauri"
+  "apps/desktop/src-tauri",
+  "apps/native-host"
 ]
 resolver = "2"
 

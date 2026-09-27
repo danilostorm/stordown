@@ -26,6 +26,7 @@ The repository currently contains:
 - unified download/upload queue with up to two simultaneous jobs;
 - persistent SQLite transfer history in the StorDown app-data folder;
 - native Windows save/open dialogs for download destinations and upload file selection;
+- Chrome/Edge native-messaging bridge with context-menu and beta automatic capture;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -192,3 +193,24 @@ The desktop UI now uses native Windows dialogs instead of requiring users to typ
 - **Google Drive uploads:** `Selecionar arquivos…` opens the Windows multi-file picker and fills the upload batch automatically.
 
 Manual path editing remains available for advanced workflows and scripting-style use.
+
+
+## Browser capture
+
+StorDown now includes a Rust native-messaging host for Chrome and Edge.
+
+When the extension captures a direct HTTP/HTTPS download, the path is:
+
+```text
+Browser extension
+  -> Chrome/Edge Native Messaging
+  -> stordown-native-host.exe
+  -> 127.0.0.1:17832
+  -> StorDown Desktop
+  -> persistent transfer queue
+  -> Multi-WAN download engine
+```
+
+The browser copy is cancelled only after the desktop returns an acknowledgement that the transfer entered the StorDown queue. If StorDown is not running or the native host is unavailable, the browser download is left alone.
+
+See [browser-extension/README.md](browser-extension/README.md) for development installation and native-host registration.
