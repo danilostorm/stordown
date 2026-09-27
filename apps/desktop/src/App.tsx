@@ -53,6 +53,7 @@ type TransferRecord = {
   bind_ips: string[];
   created_at: number;
   updated_at: number;
+  scheduled_at?: number | null;
   error?: string | null;
 };
 
@@ -72,9 +73,9 @@ type SpeedWindow = {
   bytes: number;
 };
 
-type View = "download" | "upload" | "queue" | "finished" | "settings";
+type View = "download" | "upload" | "queue" | "scheduled" | "finished" | "settings";
 
-const activeStatuses = new Set(["queued", "running", "paused", "interrupted"]);
+const activeStatuses = new Set(["scheduled", "queued", "running", "paused", "interrupted"]);
 const finishedStatuses = new Set(["completed", "failed", "cancelled"]);
 
 export default function App() {
@@ -82,6 +83,7 @@ export default function App() {
   const [url, setUrl] = useState("");
   const [output, setOutput] = useState("C:\\Downloads\\arquivo.bin");
   const [connections, setConnections] = useState(8);
+  const [downloadSchedule, setDownloadSchedule] = useState("");
   const [bindIps, setBindIps] = useState("192.168.30.101, 192.168.30.102");
   const [status, setStatus] = useState("Pronto");
   const [busy, setBusy] = useState(false);
@@ -165,6 +167,11 @@ export default function App() {
 
   const queuedRecords = useMemo(
     () => records.filter((record) => activeStatuses.has(record.status)),
+    [records],
+  );
+
+  const scheduledRecords = useMemo(
+    () => records.filter((record) => record.status === "scheduled"),
     [records],
   );
 
@@ -385,13 +392,16 @@ export default function App() {
         connections,
         bindIps: links,
         transferId,
+        scheduledAt: downloadSchedule
+          ? Math.floor(new Date(downloadSchedule).getTime() / 1000)
+          : null,
       });
 
       setActiveTransferId(record.id);
       setLinkSpeeds({});
       speedWindows.current = {};
       await reloadTransfers();
-      setStatus("Download adicionado à fila");
+      setStatus(downloadSchedule ? "Download agendado" : "Download adicionado à fila");
     } catch (error) {
       setStatus(`Erro: ${String(error)}`);
     } finally {
@@ -571,6 +581,13 @@ export default function App() {
             <b>{queuedRecords.length}</b>
           </button>
           <button
+            className={`navItem navCount ${view === "scheduled" ? "active" : ""}`}
+            onClick={() => setView("scheduled")}
+          >
+            <span>Agendador</span>
+            <b>{scheduledRecords.length}</b>
+          </button>
+          <button
             className={`navItem navCount ${view === "finished" ? "active" : ""}`}
             onClick={() => setView("finished")}
           >
@@ -578,7 +595,6 @@ export default function App() {
             <b>{finishedRecords.length}</b>
           </button>
           <button className="navItem" disabled>Cloud</button>
-          <button className="navItem" disabled>Agendador</button>
           <button
             className={`navItem ${view === "settings" ? "active" : ""}`}
             onClick={() => setView("settings")}
@@ -663,6 +679,27 @@ export default function App() {
                   Procurar…
                 </button>
               </div>
+            </label>
+
+            <label>
+              Agendar início — opcional
+              <div className="scheduleField">
+                <input
+                  type="datetime-local"
+                  value={downloadSchedule}
+                  min={toLocalDateTimeInput(new Date())}
+                  onChange={(event) => setDownloadSchedule(event.target.value)}
+                />
+                {downloadSchedule && (
+                  <button type="button" onClick={() => setDownloadSchedule("")}>
+                    Agora
+                  </button>
+                )}
+              </div>
+              <small className="fieldHint">
+                Se preenchido, o download fica salvo no SQLite e inicia automaticamente no horário,
+                inclusive após reiniciar o StorDown.
+              </small>
             </label>
 
             <div className="grid2">
@@ -822,6 +859,25 @@ export default function App() {
             onCancel={cancelTransfer}
             onDelete={deleteHistory}
           />
+        )}
+
+        {view === "scheduled" && (
+          <>
+            <div className="listToolbar">
+              <span>{scheduledRecords.length} download(s) agendado(s)</span>
+              <small>Os horários ficam persistidos e são restaurados ao iniciar o StorDown.</small>
+            </div>
+            <TransferList
+              records={scheduledRecords}
+              emptyText="Nenhum download agendado."
+              selectedId={activeTransferId}
+              onSelect={setActiveTransferId}
+              onPause={pauseTransfer}
+              onResume={resumeTransfer}
+              onCancel={cancelTransfer}
+              onDelete={deleteHistory}
+            />
+          </>
         )}
 
         {view === "finished" && (
@@ -1093,7 +1149,11 @@ function TransferList({
                   {record.total_bytes ? ` / ${formatBytes(record.total_bytes)}` : ""}
                 </span>
                 <span>{record.bind_ips.length} link(s)</span>
-                <span>{formatDate(record.updated_at)}</span>
+                <span>
+                  {record.status === "scheduled" && record.scheduled_at
+                    ? `Inicia ${formatDate(record.scheduled_at)}`
+                    : formatDate(record.updated_at)}
+                </span>
               </div>
 
               {record.error && <div className="rowError">{record.error}</div>}
@@ -1106,7 +1166,7 @@ function TransferList({
               {record.status === "paused" && (
                 <button type="button" onClick={() => onResume(record.id)}>Retomar</button>
               )}
-              {(record.status === "running" || record.status === "paused" || record.status === "queued") && (
+              {(record.status === "running" || record.status === "paused" || record.status === "queued" || record.status === "scheduled") && (
                 <button type="button" className="dangerButton" onClick={() => onCancel(record.id)}>
                   Cancelar
                 </button>
@@ -1127,6 +1187,7 @@ function StatusBadge({ status }: { status: string }) {
     queued: "Na fila",
     running: "Transferindo",
     paused: "Pausado",
+    scheduled: "Agendado",
     interrupted: "Interrompido",
     completed: "Concluído",
     failed: "Falhou",
@@ -1242,6 +1303,7 @@ function viewTitle(view: View) {
   if (view === "download") return "Novo download";
   if (view === "upload") return "Upload para Google Drive";
   if (view === "queue") return "Fila de transferências";
+  if (view === "scheduled") return "Agendador";
   if (view === "settings") return "Configurações";
   return "Histórico";
 }
@@ -1256,10 +1318,18 @@ function viewSubtitle(view: View) {
   if (view === "queue") {
     return "Downloads e uploads em uma fila única, com até duas transferências simultâneas.";
   }
+  if (view === "scheduled") {
+    return "Programe downloads HTTP/HTTPS para começar automaticamente mais tarde.";
+  }
   if (view === "settings") {
     return "Categorias e regras automáticas para organizar downloads capturados pelo navegador.";
   }
   return "Transferências concluídas, canceladas e com falha ficam salvas entre reinicializações.";
+}
+
+function toLocalDateTimeInput(date: Date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
 }
 
 function suggestedDownloadName(url: string) {
