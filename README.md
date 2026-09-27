@@ -21,6 +21,8 @@ The repository currently contains:
 - automatic discovery of active physical Windows NICs;
 - per-interface public-IP route tests to verify UDM WAN policies;
 - live transfer progress and real-time speed per local interface/WAN;
+- pause, resume and cancel controls for active downloads/uploads;
+- persistent segmented HTTP download parts with automatic retry/resume;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -148,3 +150,12 @@ During a download or Google Drive upload, StorDown shows:
 - aggregate speed across all active links.
 
 For segmented HTTP downloads the progress counter is shared across workers, so one file can show aggregate progress while each WAN still reports its own throughput. Google Drive batch uploads report each file independently while the sidebar shows the throughput of each WAN.
+
+
+## Pause, retry and HTTP resume
+
+StorDown now keeps segmented HTTP download state beside the destination as a temporary `.stordown.parts` directory.
+
+Each Range segment is written independently. If a segment connection drops, StorDown reopens that segment from the last byte already written instead of restarting the whole file. If the app is stopped or the transfer is cancelled, the partial segment files remain available. Starting the same URL again with the same destination, file size and segment count reuses those bytes.
+
+The desktop UI also exposes **Pausar**, **Retomar** and **Cancelar** for an active transfer. Google Drive uploads honor pause/cancel between resumable chunks. Drive session persistence across a full application restart remains a separate roadmap item.
