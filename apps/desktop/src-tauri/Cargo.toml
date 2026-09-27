@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 keyring = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }
+rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 stordown-core = { path = "../../../crates/stordown-core" }
