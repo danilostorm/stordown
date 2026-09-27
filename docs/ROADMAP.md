@@ -25,7 +25,7 @@
 - [x] Unified download/upload queue
 - [x] Categories and destination rules for browser-captured downloads
 - [x] Persistent SQLite history
-- [ ] Scheduler
+- [x] Persistent HTTP download scheduler
 - [ ] Speed limits
 - [x] Pause / resume / cancel controls for active transfers
 - [ ] Smart weighted balancing
