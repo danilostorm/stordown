@@ -2300,7 +2300,7 @@ function RoutePreview({
             <small>
               {probe?.public_ip
                 ? `WAN ${index + 1}: ${probe.public_ip} • ${probe.latency_ms ?? "?"} ms`
-                : `→ regra UDM → WAN ${index + 1}`}
+                : "Saída ainda não testada"}
             </small>
           </div>
         );
@@ -2546,6 +2546,7 @@ function TransferTelemetry({
 }
 
 function viewTitle(view: View) {
+  if (view === "home") return "Gerenciador";
   if (view === "download") return "Novo download";
   if (view === "upload") return "Upload para Google Drive";
   if (view === "cloud") return "Google Drive";
@@ -2556,6 +2557,9 @@ function viewTitle(view: View) {
 }
 
 function viewSubtitle(view: View) {
+  if (view === "home") {
+    return "Acompanhe downloads e uploads em tempo real, com velocidade, progresso, ETA e uso das conexões.";
+  }
   if (view === "download") {
     return "Adicione downloads HTTP/HTTPS segmentados à fila Multi-WAN.";
   }
@@ -2608,6 +2612,35 @@ function formatMbps(bytesPerSecond: number) {
 
 function formatSpeed(bytesPerSecond: number) {
   return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function fileNameFromPath(path: string) {
+  const normalized = path.replace(/\//g, "\\");
+  return normalized.split("\\").filter(Boolean).pop() ?? "";
+}
+
+function parentDirectory(path: string) {
+  const normalized = path.replace(/\//g, "\\");
+  const index = normalized.lastIndexOf("\\");
+  return index > 0 ? normalized.slice(0, index) : "";
+}
+
+function joinWindowsPath(directory: string, name: string) {
+  const cleanDir = directory.trim().replace(/[\\/]+$/, "");
+  const cleanName = name.trim().replace(/[\\/:*?"<>|]/g, "_") || "download.bin";
+  return cleanDir ? `${cleanDir}\\${cleanName}` : cleanName;
+}
+
+function formatDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0s";
+  const rounded = Math.ceil(seconds);
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const secs = rounded % 60;
+
+  if (hours > 0) return `${hours}h ${minutes}min`;
+  if (minutes > 0) return `${minutes}min ${secs}s`;
+  return `${secs}s`;
 }
 
 function formatDate(epochSeconds: number) {
