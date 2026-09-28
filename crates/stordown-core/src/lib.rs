@@ -4,6 +4,7 @@ pub mod control;
 pub mod downloader;
 pub mod model;
 pub mod network;
+pub mod relay;
 pub mod throttle;
 
 pub use adaptive::{AdaptiveLinkPool, LinkHealthSnapshot, LinkLease};
@@ -28,4 +29,8 @@ pub use model::{
     DownloadRequest, DownloadResult, LinkConfig, ProbeResult, ProgressCallback, TransferProgress,
 };
 pub use network::{probe_link, probe_links, LinkProbeResult, LinkProbeStatus};
+pub use relay::{
+    upload_to_relay, RelayCompleteResponse, RelayCreateSessionRequest, RelaySession,
+    RelaySessionStatus, RelayUploadRequest, RelayUploadResult,
+};
 pub use throttle::TransferThrottle;

@@ -3,7 +3,8 @@ members = [
   "crates/stordown-core",
   "apps/cli",
   "apps/desktop/src-tauri",
-  "apps/native-host"
+  "apps/native-host",
+  "apps/relay"
 ]
 resolver = "2"
 
@@ -14,6 +15,7 @@ authors = ["StorDown contributors"]
 
 [workspace.dependencies]
 anyhow = "1"
+axum = "0.8"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"

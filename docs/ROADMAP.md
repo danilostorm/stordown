@@ -60,9 +60,11 @@
 - [x] Smart per-file/chunk assignment across WANs for Drive batches
 - [x] Per-WAN upload telemetry for direct Drive batches
 - [x] Drive upload failover and chunk reassignment between WANs
-- [ ] StorDown Relay protocol
-- [ ] One large upload striped across two or more WANs through Relay
-- [ ] Optional self-hosted Relay on VPS/Unraid
+- [x] StorDown Relay v1 protocol + restart-safe chunk staging
+- [x] One large file striped concurrently across two or more WANs to Relay staging
+- [x] Optional self-hosted Relay service for VPS/Unraid
+- [ ] Relay destination adapter: Google Drive
+- [ ] Desktop Relay workspace + persistent Relay session resume
 
 ## Later
 

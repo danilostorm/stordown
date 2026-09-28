@@ -2,7 +2,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::{collections::HashMap, env, net::IpAddr, path::PathBuf};
 use stordown_core::{
-    download, upload_google_drive_batch, DownloadRequest, GoogleDriveBatchUploadRequest, LinkConfig,
+    download, upload_google_drive_batch, upload_to_relay, DownloadRequest,
+    GoogleDriveBatchUploadRequest, LinkConfig, RelayUploadRequest,
 };
 
 #[derive(Parser, Debug)]
@@ -35,6 +36,29 @@ enum Command {
 
         #[arg(long)]
         sha256: Option<String>,
+    },
+
+    UploadRelay {
+        #[arg(long = "file", required = true)]
+        file: PathBuf,
+
+        #[arg(long)]
+        relay_url: String,
+
+        #[arg(long = "bind", required = true)]
+        bind: Vec<IpAddr>,
+
+        #[arg(long, default_value_t = 8)]
+        chunk_mib: u64,
+
+        #[arg(long)]
+        limit_mbps: Option<u64>,
+
+        #[arg(long)]
+        session_id: Option<String>,
+
+        #[arg(long)]
+        token: Option<String>,
     },
 
     UploadDrive {
@@ -89,6 +113,56 @@ async fn main() -> Result<()> {
             println!("Saved: {}", result.output.display());
             println!("Bytes: {}", result.bytes_written);
             println!("Segments: {}", result.segments);
+            println!("Links used: {}", result.links_used.join(", "));
+        }
+
+        Command::UploadRelay {
+            file,
+            relay_url,
+            bind,
+            chunk_mib,
+            limit_mbps,
+            session_id,
+            token,
+        } => {
+            if bind.is_empty() {
+                bail!("provide at least one --bind IP");
+            }
+
+            let chunk_size = chunk_mib
+                .checked_mul(1024 * 1024)
+                .context("chunk size is too large")?;
+
+            let token = token
+                .or_else(|| env::var("STORDOWN_RELAY_TOKEN").ok())
+                .filter(|value| !value.trim().is_empty());
+
+            println!(
+                "StorDown: striping {} to Relay through {} link(s)",
+                file.display(),
+                bind.len()
+            );
+
+            let result = upload_to_relay(
+                RelayUploadRequest {
+                    source: file,
+                    relay_url,
+                    token,
+                    chunk_size,
+                    links: build_links(bind),
+                    max_bytes_per_second: limit_mbps.and_then(mbps_to_bytes_per_second),
+                    session_id,
+                },
+                "relay-cli".to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+            println!("Relay session: {}", result.session_id);
+            println!("Bytes staged: {}", result.total_size);
+            println!("SHA256: {}", result.sha256);
+            println!("Relay file: {}", result.result_path);
             println!("Links used: {}", result.links_used.join(", "));
         }
 
