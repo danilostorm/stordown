@@ -12,11 +12,13 @@ pub use cloud::{
     google_drive_media_url, list_google_drive_folders,
     list_google_drive_items, list_google_shared_drives,
     refresh_google_access_token, upload_google_drive_batch,
-    upload_google_drive_batch_with_control, upload_google_drive_batch_with_progress,
+    upload_google_drive_batch_resumable_with_control, upload_google_drive_batch_with_control,
+    upload_google_drive_batch_with_progress,
     upload_google_drive_file, upload_google_drive_file_with_control,
     upload_google_drive_file_with_progress, GoogleDriveBatchUploadRequest,
-    GoogleDriveExportFormat, GoogleDriveFolder, GoogleDriveItem, GoogleDriveUploadRequest,
-    GoogleDriveUploadResult, GoogleOAuthTokens, GoogleSharedDrive, DRIVE_FILE_SCOPE, DRIVE_READONLY_SCOPE,
+    DriveUploadCheckpointCallback, GoogleDriveExportFormat, GoogleDriveFolder, GoogleDriveItem,
+    GoogleDriveUploadRequest, GoogleDriveUploadResult, GoogleDriveUploadResumeState,
+    GoogleOAuthTokens, GoogleSharedDrive, DRIVE_FILE_SCOPE, DRIVE_READONLY_SCOPE,
 };
 pub use control::TransferControl;
 pub use downloader::{
