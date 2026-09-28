@@ -39,8 +39,8 @@
 - [ ] One-click Chrome/Edge installer
 - [x] Automatic interception for direct HTTP/HTTPS downloads
 - [x] Controlled per-site cookie/header handoff
-- [ ] Download all links
-- [ ] Site-specific capture rules
+- [x] Download all links from the active page
+- [x] Site-specific capture/ignore policies
 
 ## V0.4 - Google Drive
 
