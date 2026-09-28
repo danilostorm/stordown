@@ -767,6 +767,9 @@ pub async fn upload_google_drive_batch_resumable_with_control(
         results.push(joined??);
 
         if let Some((index, source)) = pending.pop_front() {
+            let resume = resume_sessions
+                .get(&source.to_string_lossy().to_string())
+                .cloned();
             spawn_drive_upload_job(
                 &mut jobs,
                 index,
@@ -779,6 +782,8 @@ pub async fn upload_google_drive_batch_resumable_with_control(
                 control.clone(),
                 pool.clone(),
                 throttle.clone(),
+                resume,
+                checkpoint_callback.clone(),
             );
         }
     }
