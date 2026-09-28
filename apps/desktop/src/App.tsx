@@ -44,6 +44,12 @@ type GoogleDriveItem = {
   is_google_workspace: boolean;
 };
 
+type GoogleDriveExportFormat = {
+  label: string;
+  mime_type: string;
+  extension: string;
+};
+
 type GoogleSharedDrive = {
   id: string;
   name: string;
@@ -149,6 +155,9 @@ export default function App() {
   const [cloudBreadcrumbs, setCloudBreadcrumbs] = useState<DriveBreadcrumb[]>([
     { id: null, name: "Meu Drive" },
   ]);
+  const [workspaceExportItem, setWorkspaceExportItem] = useState<GoogleDriveItem | null>(null);
+  const [workspaceExportFormats, setWorkspaceExportFormats] = useState<GoogleDriveExportFormat[]>([]);
+  const [workspaceExportBusy, setWorkspaceExportBusy] = useState(false);
   const [driveClientId, setDriveClientId] = useState("");
   const [driveAuth, setDriveAuth] = useState<GoogleAuthStatus>({ connected: false });
   const [authBusy, setAuthBusy] = useState(false);
@@ -576,6 +585,75 @@ export default function App() {
     await loadCloudItems(parent.id, cloudDriveId);
   }
 
+  async function openWorkspaceExport(item: GoogleDriveItem) {
+    if (!item.is_google_workspace || !item.can_download) {
+      setStatus("Este item não pode ser exportado pela sua permissão atual.");
+      return;
+    }
+
+    setWorkspaceExportBusy(true);
+
+    try {
+      const formats = await invoke<GoogleDriveExportFormat[]>("google_drive_export_options", {
+        mimeType: item.mime_type,
+      });
+      setWorkspaceExportItem(item);
+      setWorkspaceExportFormats(formats);
+
+      if (formats.length === 0) {
+        setStatus("Este tipo do Google Workspace ainda não tem exportação direta no StorDown.");
+      } else {
+        setStatus(`Escolha o formato para exportar ${item.name}`);
+      }
+    } catch (error) {
+      setStatus(`Erro ao carregar formatos de exportação: ${String(error)}`);
+    } finally {
+      setWorkspaceExportBusy(false);
+    }
+  }
+
+  async function exportWorkspaceItem(format: GoogleDriveExportFormat) {
+    const item = workspaceExportItem;
+    if (!item) return;
+
+    setWorkspaceExportBusy(true);
+
+    try {
+      const suggestedName = item.name.toLowerCase().endsWith(format.extension.toLowerCase())
+        ? item.name
+        : `${item.name}${format.extension}`;
+      const picked = await invoke<string | null>("pick_download_destination", {
+        suggestedName,
+      });
+      if (!picked) return;
+
+      const transferId = crypto.randomUUID();
+      const record = await invoke<TransferRecord>("enqueue_drive_export", {
+        fileId: item.id,
+        fileName: item.name,
+        sourceMime: item.mime_type,
+        exportMime: format.mime_type,
+        extension: format.extension,
+        output: picked,
+        bindIps: links,
+        speedLimitMbps: downloadSpeedLimit > 0 ? downloadSpeedLimit : null,
+        transferId,
+      });
+
+      setActiveTransferId(record.id);
+      setLinkSpeeds({});
+      speedWindows.current = {};
+      setWorkspaceExportItem(null);
+      setWorkspaceExportFormats([]);
+      await reloadTransfers();
+      setStatus(`${item.name} exportado para a fila como ${format.extension}`);
+    } catch (error) {
+      setStatus(`Erro ao exportar documento Google: ${String(error)}`);
+    } finally {
+      setWorkspaceExportBusy(false);
+    }
+  }
+
   async function downloadCloudItem(item: GoogleDriveItem) {
     if (item.is_folder) {
       await enterCloudFolder(item);
@@ -583,7 +661,7 @@ export default function App() {
     }
 
     if (item.is_google_workspace) {
-      setStatus("Arquivos Google Docs/Sheets/Slides precisam de exportação; isso entra na próxima etapa.");
+      await openWorkspaceExport(item);
       return;
     }
 
@@ -1370,6 +1448,49 @@ export default function App() {
                   </label>
                 </div>
 
+                {workspaceExportItem && (
+                  <section className="workspaceExportPanel">
+                    <div>
+                      <span>EXPORTAR GOOGLE WORKSPACE</span>
+                      <strong>{workspaceExportItem.name}</strong>
+                      <small>
+                        O Drive não aceita HTTP Range em exportações; este item usa uma conexão única.
+                        O endpoint clássico de exportação do Google limita o resultado a 10 MB.
+                      </small>
+                    </div>
+
+                    <div className="workspaceExportFormats">
+                      {workspaceExportFormats.length === 0 ? (
+                        <span className="workspaceExportUnavailable">
+                          Formato ainda não suportado pelo export direto.
+                        </span>
+                      ) : (
+                        workspaceExportFormats.map((format) => (
+                          <button
+                            type="button"
+                            key={format.mime_type}
+                            onClick={() => exportWorkspaceItem(format)}
+                            disabled={workspaceExportBusy || links.length === 0}
+                          >
+                            {format.label}
+                          </button>
+                        ))
+                      )}
+                      <button
+                        type="button"
+                        className="dangerButton"
+                        onClick={() => {
+                          setWorkspaceExportItem(null);
+                          setWorkspaceExportFormats([]);
+                        }}
+                        disabled={workspaceExportBusy}
+                      >
+                        Fechar
+                      </button>
+                    </div>
+                  </section>
+                )}
+
                 <div className="cloudItemList">
                   {cloudBusy ? (
                     <div className="driveBrowserEmpty">Carregando Google Drive…</div>
@@ -1395,8 +1516,12 @@ export default function App() {
                               Abrir
                             </button>
                           ) : item.is_google_workspace ? (
-                            <button type="button" disabled>
-                              Exportar em breve
+                            <button
+                              type="button"
+                              disabled={!item.can_download || workspaceExportBusy}
+                              onClick={() => openWorkspaceExport(item)}
+                            >
+                              Exportar
                             </button>
                           ) : (
                             <button
@@ -1942,7 +2067,7 @@ function viewSubtitle(view: View) {
     return "Adicione lotes de upload do Google Drive à mesma fila do StorDown.";
   }
   if (view === "cloud") {
-    return "Navegue no Drive e baixe arquivos binários usando HTTP Range, Smart Multi-WAN e resume.";
+    return "Navegue no Drive, baixe blobs com Multi-WAN e exporte Docs, Sheets e Slides.";
   }
   if (view === "queue") {
     return "Downloads e uploads em uma fila única, com até duas transferências simultâneas.";

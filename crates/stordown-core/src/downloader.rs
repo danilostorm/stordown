@@ -110,6 +110,36 @@ pub async fn download_with_control(
     .await
 }
 
+pub async fn download_direct_with_control(
+    request: DownloadRequest,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+) -> Result<DownloadResult> {
+    let links: Vec<LinkConfig> = request
+        .links
+        .iter()
+        .filter(|link| link.enabled)
+        .cloned()
+        .collect();
+
+    if links.is_empty() {
+        bail!("at least one enabled network link is required");
+    }
+
+    checkpoint(control.as_ref()).await?;
+
+    download_single(
+        request,
+        &links[0],
+        None,
+        transfer_id,
+        progress,
+        control,
+    )
+    .await
+}
+
 async fn probe_url(url: &str, headers: &HashMap<String, String>) -> Result<ProbeResult> {
     let client = Client::builder().build()?;
 

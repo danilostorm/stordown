@@ -109,3 +109,29 @@ StorDown checks the Drive `capabilities.canDownload` metadata before enabling th
 Google Workspace-native files (Docs, Sheets, Slides and similar) are intentionally not sent through the Range engine because Drive export operations do not support partial Range downloads. Export support remains a separate roadmap item.
 
 The current Drive download job receives an access token when it is queued. Extremely long transfers that need to open new Drive requests after that access token expires may need token-refresh integration in the active worker; this is a follow-up hardening item.
+
+
+## Google Workspace export
+
+The Cloud workspace can now export native Google Workspace files that cannot use byte-range downloads.
+
+Supported defaults and selectable formats include:
+
+- Google Docs -> DOCX, PDF, TXT, Markdown, EPUB;
+- Google Sheets -> XLSX, PDF, CSV (first sheet);
+- Google Slides -> PPTX, PDF, TXT;
+- Google Drawings -> PDF, PNG, JPEG, SVG;
+- Apps Script -> JSON.
+
+The desktop queries the supported StorDown export choices for the source MIME type, asks for a Windows destination path, then queues the export as a normal Google Drive transfer.
+
+Export requests use:
+
+```text
+GET https://www.googleapis.com/drive/v3/files/<fileId>/export?mimeType=<target>
+Authorization: Bearer <access token>
+```
+
+Unlike blob downloads, Google Workspace export does **not** support HTTP Range. StorDown therefore deliberately uses a direct single-request transfer path for exports instead of performing a wasteful Range probe.
+
+The classic `files.export` endpoint currently has a 10 MB exported-content limit. Google Vids is also not handled by this path; it requires the newer long-running `files.download` flow and remains future work.

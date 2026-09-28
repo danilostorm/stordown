@@ -15,6 +15,7 @@ The repository currently contains:
 - Google Drive resumable upload engine;
 - native Google Drive browser with My Drive + Shared Drives browsing;
 - Range-aware Google Drive blob downloads through the Smart Multi-WAN engine;
+- Google Workspace export from the Cloud browser (Docs, Sheets, Slides, Drawings and Apps Script);
 - multiple-file Drive upload distribution across NICs/WANs;
 - CLI proof of concept for downloads and Drive uploads;
 - Tauri + React desktop interface with Download and Upload workspaces;
@@ -375,3 +376,12 @@ Google Drive file
 ```
 
 Google Workspace-native documents are shown in the browser but direct Range download is disabled until the separate export workflow is implemented.
+
+
+## Google Workspace exports
+
+Native Google Workspace documents appear in the Cloud browser with **Exportar** instead of the normal Range-download button.
+
+StorDown presents compatible target formats, for example DOCX/PDF for Docs, XLSX/PDF/CSV for Sheets, and PPTX/PDF for Slides. The selected export is queued with pause/cancel telemetry and the normal Windows destination picker.
+
+Workspace export responses do not support HTTP Range, so these transfers use one direct connection rather than pretending they can aggregate WAN1 + WAN2. The standard Drive `files.export` endpoint is also limited to 10 MB of exported content; Google Vids requires a separate long-running download API.

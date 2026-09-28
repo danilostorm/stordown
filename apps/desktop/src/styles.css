@@ -1129,3 +1129,73 @@ input:focus, textarea:focus, select:focus {
     justify-content: flex-start;
   }
 }
+
+
+.workspaceExportPanel {
+  display: grid;
+  gap: 13px;
+  padding: 15px;
+  border: 1px solid #3a4164;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(25, 31, 50, .98), rgba(13, 18, 30, .98));
+}
+
+.workspaceExportPanel > div:first-child {
+  display: grid;
+  gap: 5px;
+}
+
+.workspaceExportPanel > div:first-child > span {
+  color: #8a96ff;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: .12em;
+}
+
+.workspaceExportPanel > div:first-child > strong {
+  font-size: 13px;
+}
+
+.workspaceExportPanel > div:first-child > small {
+  color: #8390a7;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.workspaceExportFormats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workspaceExportFormats button {
+  border: 1px solid #394662;
+  border-radius: 9px;
+  padding: 9px 11px;
+  background: #182236;
+  color: #edf1ff;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.workspaceExportFormats button:hover:not(:disabled) {
+  border-color: #6d7cff;
+}
+
+.workspaceExportFormats button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.workspaceExportFormats .dangerButton {
+  border-color: #58333f;
+  background: #27151b;
+  color: #ff9baa;
+}
+
+.workspaceExportUnavailable {
+  align-self: center;
+  color: #8e99af;
+  font-size: 10px;
+}
