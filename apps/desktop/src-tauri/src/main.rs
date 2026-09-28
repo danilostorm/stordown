@@ -60,6 +60,14 @@ struct BrowserCaptureResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct BrowserIntegrationResult {
+    manifest_path: String,
+    native_host_path: String,
+    chrome_registered: bool,
+    edge_registered: bool,
+}
+
 #[derive(Debug, Clone)]
 struct GoogleSession {
     client_id: String,
@@ -1082,6 +1090,133 @@ fn unique_destination(directory: &Path, file_name: &str) -> PathBuf {
     directory.join(format!("{stem}-{}.bin", Uuid::new_v4()))
 }
 
+fn validate_extension_id(value: &str) -> Result<String, String> {
+    let value = value.trim().to_ascii_lowercase();
+
+    if value.len() != 32 || !value.chars().all(|ch| ('a'..='p').contains(&ch)) {
+        return Err(
+            "ID da extensão inválido. Copie o ID de 32 caracteres mostrado em chrome://extensions ou edge://extensions."
+                .to_string(),
+        );
+    }
+
+    Ok(value)
+}
+
+fn native_host_source_path() -> Result<PathBuf, String> {
+    let current = env::current_exe()
+        .map_err(|error| format!("Falha ao localizar o executável do StorDown: {error}"))?;
+    let directory = current
+        .parent()
+        .ok_or_else(|| "Pasta do StorDown não encontrada".to_string())?;
+
+    let candidates = [
+        directory.join("stordown-native-host.exe"),
+        directory.join("resources").join("stordown-native-host.exe"),
+        directory
+            .parent()
+            .map(|parent| parent.join("stordown-native-host.exe"))
+            .unwrap_or_default(),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            "stordown-native-host.exe não foi encontrado ao lado do StorDown. Em desenvolvimento, compile com: cargo build -p stordown-native-host"
+                .to_string()
+        })
+}
+
+fn register_native_host_key(key: &str, manifest_path: &Path) -> Result<(), String> {
+    let output = Command::new("reg.exe")
+        .args([
+            "ADD",
+            key,
+            "/ve",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &manifest_path.to_string_lossy(),
+            "/f",
+        ])
+        .output()
+        .map_err(|error| format!("Falha ao executar reg.exe: {error}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[tauri::command]
+fn install_browser_integration(extension_id: String) -> Result<BrowserIntegrationResult, String> {
+    let extension_id = validate_extension_id(&extension_id)?;
+    let source = native_host_source_path()?;
+
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA não está disponível neste Windows".to_string())?;
+    let install_dir = local_app_data.join("StorDown").join("BrowserIntegration");
+    std::fs::create_dir_all(&install_dir)
+        .map_err(|error| format!("Falha ao criar pasta da integração: {error}"))?;
+
+    let installed_host = install_dir.join("stordown-native-host.exe");
+    if source != installed_host {
+        std::fs::copy(&source, &installed_host)
+            .map_err(|error| format!("Falha ao instalar Native Host: {error}"))?;
+    }
+
+    let manifest_path = install_dir.join("native-messaging-host.json");
+    let manifest = serde_json::json!({
+        "name": "cloud.hoststorm.stordown",
+        "description": "StorDown browser capture bridge",
+        "path": installed_host.to_string_lossy(),
+        "type": "stdio",
+        "allowed_origins": [
+            format!("chrome-extension://{extension_id}/")
+        ]
+    });
+
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("Falha ao gravar manifesto do navegador: {error}"))?;
+
+    let chrome_key = r"HKCU\Software\Google\Chrome\NativeMessagingHosts\cloud.hoststorm.stordown";
+    let edge_key = r"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\cloud.hoststorm.stordown";
+
+    let chrome_registered = register_native_host_key(chrome_key, &manifest_path).is_ok();
+    let edge_registered = register_native_host_key(edge_key, &manifest_path).is_ok();
+
+    if !chrome_registered && !edge_registered {
+        return Err("Não foi possível registrar o Native Host no Chrome nem no Edge".to_string());
+    }
+
+    Ok(BrowserIntegrationResult {
+        manifest_path: manifest_path.to_string_lossy().to_string(),
+        native_host_path: installed_host.to_string_lossy().to_string(),
+        chrome_registered,
+        edge_registered,
+    })
+}
+
+#[tauri::command]
+fn open_browser_extensions(browser: String) -> Result<(), String> {
+    let (program, url) = match browser.to_ascii_lowercase().as_str() {
+        "edge" => ("msedge.exe", "edge://extensions/"),
+        _ => ("chrome.exe", "chrome://extensions/"),
+    };
+
+    Command::new(program)
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Não foi possível abrir {program}: {error}"))
+}
+
 #[tauri::command]
 async fn list_download_rules(
     store: State<'_, TransferStore>,
@@ -1320,6 +1455,8 @@ fn main() {
             list_transfers,
             delete_transfer_history,
             clear_finished_history,
+            install_browser_integration,
+            open_browser_extensions,
             list_download_rules,
             save_download_rule,
             delete_download_rule,
