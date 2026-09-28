@@ -204,6 +204,15 @@ pub async fn list_google_drive_items(
     parent_id: Option<&str>,
     drive_id: Option<&str>,
 ) -> Result<Vec<GoogleDriveItem>> {
+    list_google_drive_items_with_resource_key(access_token, parent_id, drive_id, None).await
+}
+
+pub async fn list_google_drive_items_with_resource_key(
+    access_token: &str,
+    parent_id: Option<&str>,
+    drive_id: Option<&str>,
+    parent_resource_key: Option<&str>,
+) -> Result<Vec<GoogleDriveItem>> {
     let client = Client::new();
     let parent = parent_id
         .filter(|value| !value.trim().is_empty())
@@ -239,6 +248,13 @@ pub async fn list_google_drive_items(
             request = request.query(&[("corpora", "drive"), ("driveId", drive_id)]);
         } else {
             request = request.query(&[("corpora", "user")]);
+        }
+
+        if let Some(resource_key) = parent_resource_key.filter(|value| !value.trim().is_empty()) {
+            request = request.header(
+                "X-Goog-Drive-Resource-Keys",
+                format!("{parent}/{resource_key}"),
+            );
         }
 
         if let Some(token) = page_token.as_deref() {
