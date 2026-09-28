@@ -281,6 +281,15 @@ export default function App() {
     [records],
   );
 
+  const aggregateLiveSpeed = useMemo(
+    () =>
+      queuedRecords.reduce(
+        (sum, record) => sum + (liveTransferStats[record.id]?.speed ?? 0),
+        0,
+      ),
+    [queuedRecords, liveTransferStats],
+  );
+
   async function reloadTransfers() {
     try {
       const items = await invoke<TransferRecord[]>("list_transfers", { limit: 300 });
@@ -1304,6 +1313,106 @@ export default function App() {
           <div className="statusPill">{status}</div>
         </header>
 
+        {view === "home" && (
+          <section className="managerHome">
+            <div className="quickActions">
+              <button type="button" className="primary actionTile" onClick={() => setView("download")}>
+                <span>↓</span>
+                <div>
+                  <strong>Novo download</strong>
+                  <small>HTTP/HTTPS, Range e Multi-WAN</small>
+                </div>
+              </button>
+              <button type="button" className="actionTile" onClick={() => setView("upload")}>
+                <span>↑</span>
+                <div>
+                  <strong>Novo upload</strong>
+                  <small>Google Drive resumível</small>
+                </div>
+              </button>
+              <button type="button" className="actionTile" onClick={openCloudWorkspace}>
+                <span>☁</span>
+                <div>
+                  <strong>Google Drive</strong>
+                  <small>Navegar, baixar e exportar</small>
+                </div>
+              </button>
+              <button type="button" className="actionTile" onClick={() => setView("settings")}>
+                <span>⊕</span>
+                <div>
+                  <strong>Extensão</strong>
+                  <small>Chrome / Edge</small>
+                </div>
+              </button>
+            </div>
+
+            <div className="managerStats">
+              <article>
+                <span>Velocidade total</span>
+                <strong>{formatSpeed(aggregateLiveSpeed)}</strong>
+                <small>somando transferências ativas</small>
+              </article>
+              <article>
+                <span>Em andamento</span>
+                <strong>{records.filter((record) => record.status === "running").length}</strong>
+                <small>{queuedRecords.length} item(ns) na fila</small>
+              </article>
+              <article>
+                <span>Links ativos</span>
+                <strong>{links.length}</strong>
+                <small>{routeTests.length ? "rotas testadas" : "teste as WANs nas configurações de rede"}</small>
+              </article>
+              <article>
+                <span>Concluídos</span>
+                <strong>{records.filter((record) => record.status === "completed").length}</strong>
+                <small>histórico persistente</small>
+              </article>
+            </div>
+
+            <section className="managerPanel">
+              <div className="managerPanelHeader">
+                <div>
+                  <strong>Transferências</strong>
+                  <small>Progresso, velocidade e tempo restante em tempo real</small>
+                </div>
+                <button type="button" onClick={() => setView("queue")}>Ver fila completa</button>
+              </div>
+              <TransferList
+                records={queuedRecords}
+                emptyText="Nenhuma transferência ativa. Adicione um download para começar."
+                selectedId={activeTransferId}
+                onSelect={setActiveTransferId}
+                onPause={pauseTransfer}
+                onResume={resumeTransfer}
+                onCancel={cancelTransfer}
+                onDelete={deleteHistory}
+                liveStats={liveTransferStats}
+              />
+            </section>
+
+            <section className="managerPanel">
+              <div className="managerPanelHeader">
+                <div>
+                  <strong>Recentes</strong>
+                  <small>Últimas transferências finalizadas</small>
+                </div>
+                <button type="button" onClick={() => setView("finished")}>Abrir histórico</button>
+              </div>
+              <TransferList
+                records={finishedRecords.slice(0, 5)}
+                emptyText="Ainda não há downloads concluídos."
+                selectedId={activeTransferId}
+                onSelect={setActiveTransferId}
+                onPause={pauseTransfer}
+                onResume={resumeTransfer}
+                onCancel={cancelTransfer}
+                onDelete={deleteHistory}
+                liveStats={liveTransferStats}
+              />
+            </section>
+          </section>
+        )}
+
         {view === "download" && (
           <form className="downloadCard" onSubmit={submitDownload}>
             <div className="notice">
@@ -1914,6 +2023,7 @@ export default function App() {
             onResume={resumeTransfer}
             onCancel={cancelTransfer}
             onDelete={deleteHistory}
+            liveStats={liveTransferStats}
           />
         )}
 
@@ -1932,6 +2042,7 @@ export default function App() {
               onResume={resumeTransfer}
               onCancel={cancelTransfer}
               onDelete={deleteHistory}
+              liveStats={liveTransferStats}
             />
           </>
         )}
@@ -1953,6 +2064,7 @@ export default function App() {
               onResume={resumeTransfer}
               onCancel={cancelTransfer}
               onDelete={deleteHistory}
+              liveStats={liveTransferStats}
             />
           </>
         )}
