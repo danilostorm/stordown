@@ -28,6 +28,7 @@ The repository currently contains:
 - native Windows save/open dialogs for download destinations and upload file selection;
 - Chrome/Edge native-messaging bridge with context-menu and automatic capture;
 - explicit per-site cookie handoff for authenticated browser downloads;
+- browser per-site capture/ignore policies and active-page batch link capture;
 - automatic download categories and extension-based destination rules;
 - persistent HTTP download scheduler with restart recovery;
 - adaptive Multi-WAN chunk scheduling with automatic link failover;
@@ -325,3 +326,10 @@ StorDown now supports an optional aggregate speed cap per transfer. The limit is
 HTTP downloads also accept an optional expected SHA256 value. After the final file is assembled, StorDown streams the file through SHA256 verification before marking the transfer complete. A mismatch fails the transfer and reports both expected and calculated hashes.
 
 Scheduled downloads persist both the speed limit and expected SHA256 in SQLite, so those options survive a StorDown restart.
+
+
+## Browser site policies and batch capture
+
+The Chrome/Edge extension can override global automatic capture per origin with **inherit**, **always capture** or **never capture** policies.
+
+It can also scan the active page and submit up to 250 unique HTTP/HTTPS links to StorDown, using a small bounded concurrency so the Native Messaging bridge is not flooded. Each accepted URL still goes through the normal Windows NIC detection, category rules, persistent queue and Multi-WAN download engine.

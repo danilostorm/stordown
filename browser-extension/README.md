@@ -10,6 +10,8 @@ Chrome/Edge Manifest V3 integration for sending browser downloads to the StorDow
 - Native Messaging bridge through `cloud.hoststorm.stordown`.
 - Browser download is cancelled only after the StorDown desktop confirms the transfer was accepted into its queue.
 - **Per-site authenticated download support** with explicit cookie permission.
+- Per-site automatic-capture policies: inherit, always capture or never capture.
+- **Baixar todos os links** from the current page, with up to 250 unique HTTP/HTTPS links per batch.
 
 ## Authenticated downloads
 
@@ -75,6 +77,23 @@ The desktop capture listener binds only to loopback. It automatically uses the a
 
 ## Next browser milestone
 
-- per-site capture rules and exclusions;
 - packaged extension/native-host installer;
-- download-all-links support.
+- batch link review/filter UI before enqueue;
+- richer per-site filename/capture filters.
+
+
+## Site-specific capture policies
+
+The global automatic-capture switch can now be overridden for the active origin:
+
+- **Seguir configuração global** keeps the global behavior.
+- **Sempre capturar neste site** intercepts HTTP/HTTPS downloads for that site even when global capture is off.
+- **Nunca capturar neste site** leaves browser downloads from that site alone.
+
+Policies are stored locally in the extension and do not grant cookie access by themselves.
+
+## Download all links
+
+The popup and page context menu can scan the active page for unique HTTP/HTTPS anchors and send them to StorDown in a bounded batch.
+
+The current implementation accepts up to 250 links and uses four concurrent Native Messaging submissions. Category/destination rules are applied independently by StorDown Desktop for every accepted link.

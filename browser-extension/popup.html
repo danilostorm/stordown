@@ -26,11 +26,21 @@
 
     <label class="toggleRow">
       <div>
-        <strong>Captura automática</strong>
+        <strong>Captura automática global</strong>
         <span>Envia downloads HTTP/HTTPS do navegador para a fila StorDown.</span>
       </div>
       <input id="autoCapture" type="checkbox" />
     </label>
+
+    <section class="sitePolicyCard">
+      <span class="label">REGRA DO SITE ATUAL</span>
+      <strong id="policySiteName">Site atual</strong>
+      <select id="sitePolicy">
+        <option value="inherit">Seguir configuração global</option>
+        <option value="capture">Sempre capturar neste site</option>
+        <option value="ignore">Nunca capturar neste site</option>
+      </select>
+    </section>
 
     <section class="authCard">
       <div class="authInfo">
@@ -41,14 +51,23 @@
       <button id="siteAuthButton" type="button">Autorizar site</button>
     </section>
 
+    <section class="batchCard">
+      <div>
+        <span class="label">LOTE DA PÁGINA</span>
+        <strong>Baixar todos os links</strong>
+        <span id="batchStatus">Encontra até 250 links HTTP/HTTPS da página atual.</span>
+      </div>
+      <button id="downloadAllButton" type="button">Capturar links</button>
+    </section>
+
     <p class="hint">
       A autorização de login é por site. O StorDown só recebe cookies do domínio que você
       autorizou e apenas quando captura um download daquele site.
     </p>
 
     <p class="hint">
-      Você também pode clicar com o botão direito em qualquer link e usar
-      <b>Baixar com StorDown</b>.
+      Você também pode clicar com o botão direito em um link para <b>Baixar com StorDown</b>
+      ou na página para <b>Baixar todos os links com StorDown</b>.
     </p>
   </main>
 
