@@ -4,9 +4,15 @@ const testButton = document.getElementById("testButton");
 const siteName = document.getElementById("siteName");
 const siteAuthStatus = document.getElementById("siteAuthStatus");
 const siteAuthButton = document.getElementById("siteAuthButton");
+const sitePolicy = document.getElementById("sitePolicy");
+const policySiteName = document.getElementById("policySiteName");
+const downloadAllButton = document.getElementById("downloadAllButton");
+const batchStatus = document.getElementById("batchStatus");
 
 let activeOrigin = null;
 let activePattern = null;
+let activeTabId = null;
+let activePageUrl = null;
 
 function permissionPattern(url) {
   try {
@@ -50,22 +56,54 @@ async function testDesktop() {
 async function loadActiveSite() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const tab = tabs[0];
-  const permission = permissionPattern(tab?.url || "");
+  activeTabId = tab?.id ?? null;
+  activePageUrl = tab?.url ?? null;
+
+  const permission = permissionPattern(activePageUrl || "");
 
   if (!permission) {
     activeOrigin = null;
     activePattern = null;
     siteName.textContent = "Página não suportada";
-    siteAuthStatus.textContent = "Abra um site HTTP/HTTPS para autorizar cookies.";
+    policySiteName.textContent = "Página não suportada";
+    siteAuthStatus.textContent = "Abra um site HTTP/HTTPS.";
     siteAuthButton.disabled = true;
+    sitePolicy.disabled = true;
+    downloadAllButton.disabled = true;
     return;
   }
 
   activeOrigin = permission.origin;
   activePattern = permission.pattern;
   siteName.textContent = permission.host;
+  policySiteName.textContent = permission.host;
   siteAuthButton.disabled = false;
-  await refreshSiteAuth();
+  sitePolicy.disabled = false;
+  downloadAllButton.disabled = false;
+
+  await Promise.all([refreshSiteAuth(), refreshSitePolicy()]);
+}
+
+async function refreshSitePolicy() {
+  if (!activeOrigin) return;
+
+  const { sitePolicies = {} } = await chrome.storage.local.get("sitePolicies");
+  sitePolicy.value = sitePolicies[activeOrigin] || "inherit";
+}
+
+async function saveSitePolicy() {
+  if (!activeOrigin) return;
+
+  const { sitePolicies = {} } = await chrome.storage.local.get("sitePolicies");
+  const next = { ...sitePolicies };
+
+  if (sitePolicy.value === "inherit") {
+    delete next[activeOrigin];
+  } else {
+    next[activeOrigin] = sitePolicy.value;
+  }
+
+  await chrome.storage.local.set({ sitePolicies: next });
 }
 
 async function refreshSiteAuth() {
@@ -96,14 +134,10 @@ async function toggleSiteAuthorization() {
   });
 
   if (currentlyGranted && authorizedOrigins.includes(activeOrigin)) {
-    await chrome.permissions.remove({
-      origins: [activePattern],
-    });
-
+    await chrome.permissions.remove({ origins: [activePattern] });
     await chrome.storage.local.set({
       authorizedOrigins: authorizedOrigins.filter((origin) => origin !== activeOrigin),
     });
-
     await refreshSiteAuth();
     return;
   }
@@ -122,12 +156,53 @@ async function toggleSiteAuthorization() {
   await refreshSiteAuth();
 }
 
+async function downloadAllLinks() {
+  if (!Number.isInteger(activeTabId)) return;
+
+  downloadAllButton.disabled = true;
+  batchStatus.textContent = "Lendo links e enviando para o StorDown…";
+  batchStatus.dataset.state = "checking";
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "stordown-download-all",
+      tabId: activeTabId,
+      pageUrl: activePageUrl,
+    });
+
+    if (!response) {
+      batchStatus.textContent = "Sem resposta da extensão.";
+      batchStatus.dataset.state = "error";
+      return;
+    }
+
+    if (response.total === 0 && response.ok) {
+      batchStatus.textContent = "Nenhum link HTTP/HTTPS encontrado.";
+      batchStatus.dataset.state = "off";
+      return;
+    }
+
+    batchStatus.textContent = response.failed
+      ? `${response.accepted} enviados • ${response.failed} falharam`
+      : `${response.accepted} link(s) adicionados à fila`;
+
+    batchStatus.dataset.state = response.failed ? "error" : "ok";
+  } catch (error) {
+    batchStatus.textContent = String(error);
+    batchStatus.dataset.state = "error";
+  } finally {
+    downloadAllButton.disabled = false;
+  }
+}
+
 autoCapture.addEventListener("change", async () => {
   await chrome.storage.local.set({ autoCapture: autoCapture.checked });
 });
 
+sitePolicy.addEventListener("change", saveSitePolicy);
 testButton.addEventListener("click", testDesktop);
 siteAuthButton.addEventListener("click", toggleSiteAuthorization);
+downloadAllButton.addEventListener("click", downloadAllLinks);
 
 loadSettings();
 loadActiveSite();
