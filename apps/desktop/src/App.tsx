@@ -1290,47 +1290,61 @@ export default function App() {
         </nav>
 
         <div className="networkCard">
-          <span>Multi-Link</span>
-          <strong>{links.length} links configurados</strong>
-          <div className="smartWanBadge">Smart balance + failover automático</div>
+          <span>Conexões de rede</span>
+          <strong>{links.length} selecionada(s)</strong>
+          <div className="smartWanBadge">
+            {links.length > 1 ? "Multi-WAN disponível para testar" : "Modo single-link disponível"}
+          </div>
 
-          {links.map((ip, index) => {
-            const nic = nicByIp.get(ip);
-            const probe = probeByIp.get(ip);
+          {detectedNics.length > 0 ? (
+            detectedNics.map((nic, index) => {
+              const ip = nic.ipv4;
+              const probe = probeByIp.get(ip);
+              const selected = links.includes(ip);
 
-            return (
-              <div className="networkLink" key={ip}>
-                <div className="linkRow">
-                  <i className={probe?.error ? "bad" : ""} />
-                  <span>{nic?.name ?? `Ethernet ${index + 1}`}</span>
-                  <code>{ip}</code>
-                </div>
-                <div className="linkMeta">
-                  {nic?.link_speed && <span>{nic.link_speed}</span>}
-                  {probe?.public_ip && (
-                    <span>
-                      WAN: {probe.public_ip} • {probe.latency_ms ?? "?"} ms
-                    </span>
-                  )}
-                  {probe?.error && <span className="errorText">Sem saída</span>}
-                  {linkSpeeds[ip] !== undefined && (
-                    <span className="speedText">{formatSpeed(linkSpeeds[ip])}</span>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+              return (
+                <label className={`networkLink networkChoice ${selected ? "selected" : ""}`} key={ip}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={(event) => toggleNetworkInterface(ip, event.target.checked)}
+                  />
+                  <div className="networkChoiceBody">
+                    <div className="linkRow">
+                      <i className={probe?.error ? "bad" : ""} />
+                      <span>{nic.name || `Interface ${index + 1}`}</span>
+                      <code>{ip}</code>
+                    </div>
+                    <div className="linkMeta">
+                      {nic.link_speed && <span>{nic.link_speed}</span>}
+                      {probe?.public_ip && (
+                        <span>
+                          Internet: {probe.public_ip} • {probe.latency_ms ?? "?"} ms
+                        </span>
+                      )}
+                      {probe?.error && <span className="errorText">Sem saída</span>}
+                      {linkSpeeds[ip] !== undefined && (
+                        <span className="speedText">{formatSpeed(linkSpeeds[ip])}</span>
+                      )}
+                    </div>
+                  </div>
+                </label>
+              );
+            })
+          ) : (
+            <div className="networkEmpty">Nenhuma placa ativa detectada.</div>
+          )}
 
           <div className="networkActions">
             <button type="button" onClick={detectNetworks} disabled={networkBusy}>
-              Detectar placas
+              Redetectar
             </button>
             <button
               type="button"
               onClick={testRoutes}
               disabled={networkBusy || links.length === 0}
             >
-              Testar WANs
+              Testar saídas
             </button>
           </div>
         </div>
@@ -1551,7 +1565,7 @@ export default function App() {
 
             <div className="grid2">
               <label>
-                Conexões
+                Conexões simultâneas por arquivo
                 <input
                   type="number"
                   min={1}
@@ -1563,19 +1577,22 @@ export default function App() {
                     window.localStorage.setItem("stordown.connections", String(value));
                   }}
                 />
+                <small className="fieldHint">
+                  O StorDown distribui os blocos entre as interfaces selecionadas automaticamente.
+                </small>
               </label>
 
-              <label>
-                IPs das interfaces
-                <input
-                  value={bindIps}
-                  onChange={(e) => {
-                    setBindIps(e.target.value);
-                    setRouteTests([]);
-                  }}
-                  placeholder="Use Detectar placas ou informe os IPs"
-                />
-              </label>
+              <div className="selectedLinksSummary">
+                <span>Interfaces usadas</span>
+                <strong>{links.length || 0}</strong>
+                <small>
+                  {links.length > 1
+                    ? "Multi-link ativo. Use 'Testar saídas' para confirmar Internet independente."
+                    : links.length === 1
+                      ? "Single-link ativo. Funciona normalmente em qualquer PC."
+                      : "Selecione ao menos uma interface na barra lateral."}
+                </small>
+              </div>
             </div>
 
             <RoutePreview links={links} nics={nicByIp} probes={probeByIp} />
