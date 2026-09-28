@@ -401,7 +401,12 @@ export default function App() {
           record.id === payload.transfer_id
             ? {
                 ...record,
-                status: payload.completed ? "completed" : record.status === "paused" ? "paused" : "running",
+                status:
+                  payload.completed && record.direction === "download"
+                    ? "completed"
+                    : record.status === "paused"
+                      ? "paused"
+                      : "running",
                 bytes_transferred:
                   payload.direction === "download"
                     ? Math.max(record.bytes_transferred, payload.bytes_transferred)
@@ -962,11 +967,12 @@ export default function App() {
     try {
       const picked = await invoke<string | null>("pick_download_folder");
       if (picked) {
-        const name =
-          downloadProbe?.suggested_name ||
-          fileNameFromPath(output) ||
-          suggestedDownloadName(downloadProbe?.final_url || url) ||
-          "download.bin";
+        const name = outputManuallyEdited
+          ? fileNameFromPath(output) || "download.bin"
+          : downloadProbe?.suggested_name ||
+            suggestedDownloadName(downloadProbe?.final_url || url) ||
+            fileNameFromPath(output) ||
+            "download.bin";
         setDefaultDownloadDir(picked);
         window.localStorage.setItem("stordown.downloadDir", picked);
         setOutput(joinWindowsPath(picked, name));
