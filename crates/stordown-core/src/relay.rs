@@ -196,20 +196,19 @@ pub async fn upload_to_relay(
     let transferred = Arc::new(AtomicU64::new(status.received_bytes));
     let total_chunks = session.total_chunks;
 
-    emit_progress(
-        progress.as_ref(),
-        &transfer_id,
-        &file_name,
-        "relay-starting",
-        0,
-        status.received_bytes,
-        total_size,
-        &pool.acquire().await.link,
-        false,
-    );
-    // release the synthetic telemetry lease immediately.
-    let synthetic = pool.acquire().await;
-    pool.release(&synthetic).await;
+    if let Some(snapshot) = pool.snapshots().await.into_iter().next() {
+        emit_progress(
+            progress.as_ref(),
+            &transfer_id,
+            &file_name,
+            "relay-starting",
+            0,
+            status.received_bytes,
+            total_size,
+            &snapshot.link,
+            false,
+        );
+    }
 
     let mut pending: VecDeque<u64> = (0..total_chunks)
         .filter(|index| !received.contains(index))
