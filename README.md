@@ -41,6 +41,8 @@ The repository currently contains:
 - persistent Google Drive resumable-upload checkpoints across app/Windows restarts;
 - per-transfer aggregate speed limits for HTTP downloads and Drive upload batches;
 - optional SHA256 verification before HTTP downloads are marked complete;
+- StorDown Relay v1 for concurrent single-file striping across multiple WANs to a self-hosted staging endpoint;
+- restart-safe Relay sessions with per-chunk SHA256 verification and Docker/Unraid deployment;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -403,3 +405,21 @@ If Google has expired the saved resumable session, StorDown transparently create
 Paste a Drive/Docs/Sheets/Slides share URL into the Cloud workspace and StorDown resolves the item directly through the Drive API.
 
 Blob files can be sent to the Smart Multi-WAN Range downloader, Workspace-native documents can be exported, and shared folders can be opened in the Cloud browser. Link `resourcekey` values are preserved and sent through the Google Drive resource-key header when required.
+
+
+## StorDown Relay v1
+
+The first Relay transport is now implemented for the case the original destination cannot receive different pieces of one file in parallel.
+
+```text
+one large file
+  +-> chunk A -> NIC1 -> WAN1 -+
+  +-> chunk B -> NIC2 -> WAN2 -+-> StorDown Relay -> assembled file
+  +-> chunk C -> adaptive WAN -+
+```
+
+Every chunk is an independent request bound to a selected local interface, which allows two UDM policy-routed source IPs to transmit at the same time. The Relay persists chunks and session metadata on disk, validates optional per-chunk SHA256 values, and assembles the result only after all chunks are present.
+
+A Dockerfile is included for VPS/Unraid deployment. The current v1 endpoint is a **staging transport**; forwarding the assembled result into Google Drive is the next Relay destination-adapter milestone.
+
+See [docs/RELAY.md](docs/RELAY.md).
