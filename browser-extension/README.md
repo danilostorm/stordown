@@ -35,6 +35,20 @@ The desktop accepts only a small header allowlist and rejects CR/LF injection. B
 
 If the site is not authorized, capture still works but no cookies are sent to StorDown.
 
+## Desktop installer
+
+The StorDown desktop **Configurações** screen can register the Native Messaging host for both Chrome and Edge.
+
+1. Load the extension once in `chrome://extensions` or `edge://extensions`.
+2. Copy the 32-character extension ID.
+3. In StorDown, open **Configurações > Integração Chrome / Edge**.
+4. Paste the ID and click **Instalar integração**.
+5. Click **Testar** in the extension popup.
+
+StorDown copies `stordown-native-host.exe` into the current user's LocalAppData folder, creates the Native Messaging manifest and registers it under the Chrome and Edge HKCU registry keys. Administrator rights are not required.
+
+A fully store-style one-click install still depends on publishing/signing the browser extension so it has a stable extension ID.
+
 ## Development install
 
 1. Build the native host:
@@ -77,7 +91,7 @@ The desktop capture listener binds only to loopback. It automatically uses the a
 
 ## Next browser milestone
 
-- packaged extension/native-host installer;
+- published/signed Chrome/Edge extension package with a stable ID;
 - batch link review/filter UI before enqueue;
 - richer per-site filename/capture filters.
 
