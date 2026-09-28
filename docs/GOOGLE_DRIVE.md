@@ -61,3 +61,19 @@ The relay is optional. Normal Drive uploads work directly from the desktop witho
 ## Shared Drives
 
 The resumable session endpoint is created with `supportsAllDrives=true`. Shared Drive destination selection and browsing will be added with the OAuth/provider UI.
+
+
+## Folder browser and Shared Drives
+
+StorDown now has a native destination browser inside the Windows desktop UI. After the Google account is connected, the upload screen can list folders from **My Drive** and the user's **Shared Drives**, navigate nested folders and place the selected folder ID directly into the resumable upload request.
+
+The browser uses Drive metadata only; StorDown does not download file contents just to render the picker. The OAuth flow requests both:
+
+```text
+https://www.googleapis.com/auth/drive.file
+https://www.googleapis.com/auth/drive.metadata.readonly
+```
+
+Existing development sessions created before this scope was added may need to be disconnected and authorized again so Google can grant metadata browsing.
+
+Shared-drive folder listing uses `supportsAllDrives=true`, `includeItemsFromAllDrives=true`, and the selected shared-drive ID. Upload creation already uses `supportsAllDrives=true`, so choosing a writable folder in a Shared Drive feeds directly into the existing upload engine.
