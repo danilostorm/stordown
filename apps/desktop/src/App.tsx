@@ -920,12 +920,16 @@ export default function App() {
 
   async function chooseDownloadDestination() {
     try {
-      const picked = await invoke<string | null>("pick_download_destination", {
-        suggestedName: suggestedDownloadName(url),
-      });
+      const picked = await invoke<string | null>("pick_download_folder");
       if (picked) {
-        setOutput(picked);
-        setStatus("Destino selecionado");
+        const name =
+          downloadProbe?.suggested_name ||
+          fileNameFromPath(output) ||
+          suggestedDownloadName(downloadProbe?.final_url || url) ||
+          "download.bin";
+        setOutput(joinWindowsPath(picked, name));
+        setOutputManuallyEdited(false);
+        setStatus(`Pasta de destino: ${picked}`);
       }
     } catch (error) {
       setStatus(`Erro ao abrir seletor do Windows: ${String(error)}`);
@@ -1075,6 +1079,21 @@ export default function App() {
     }
   }
 
+  async function prepareBrowserExtension() {
+    setBrowserInstallBusy(true);
+    setStatus("Preparando extensão Chrome/Edge incluída no StorDown…");
+
+    try {
+      const result = await invoke<BrowserExtensionPrepared>("prepare_browser_extension");
+      setBrowserExtensionPrepared(result);
+      setStatus("Extensão extraída. Ative o modo desenvolvedor e use 'Carregar sem compactação'.");
+    } catch (error) {
+      setStatus(`Erro ao preparar extensão: ${String(error)}`);
+    } finally {
+      setBrowserInstallBusy(false);
+    }
+  }
+
   async function installBrowserIntegration() {
     setBrowserInstallBusy(true);
     setStatus("Instalando integração Chrome/Edge…");
@@ -1104,7 +1123,7 @@ export default function App() {
     setRuleId(null);
     setRuleName("Vídeos");
     setRuleExtensions("mkv, mp4, avi, mov");
-    setRuleDestination("C:\\Downloads\\Vídeos");
+    setRuleDestination(defaultDownloadDir || parentDirectory(output));
     setRuleEnabled(true);
     setRulePriority(100);
   }
