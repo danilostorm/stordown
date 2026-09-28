@@ -1546,11 +1546,27 @@ async fn handle_browser_capture(
             ok: false,
             transfer_id: None,
             status: None,
-            error: Some("Nenhuma interface Ethernet ativa foi detectada".to_string()),
+            error: Some("Nenhuma interface de rede ativa foi detectada".to_string()),
         };
     }
 
-    let file_name = browser_capture_filename(&url, request.filename.as_deref());
+    let file_name = if request
+        .filename
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        browser_capture_filename(&url, request.filename.as_deref())
+    } else {
+        match probe(&url).await {
+            Ok(metadata) => metadata
+                .suggested_name
+                .map(|name| sanitize_windows_file_name(&name))
+                .unwrap_or_else(|| browser_capture_filename(&url, None)),
+            Err(_) => browser_capture_filename(&url, None),
+        }
+    };
 
     let destination_dir = match store.match_download_rule(&file_name).await {
         Ok(Some(rule)) => {
