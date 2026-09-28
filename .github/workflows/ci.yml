@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "feat/**"]
+    branches: ["main", "feat/**", "release/**"]
   pull_request:
 
 jobs:
@@ -12,6 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build bundled Native Host
+        run: cargo build --release -p stordown-native-host
       - name: Check workspace
         run: cargo check --workspace
       - name: Test workspace
