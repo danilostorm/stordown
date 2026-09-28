@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     cmp::min,
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     net::IpAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -157,6 +158,22 @@ struct GoogleSharedDriveListResponse {
     #[serde(rename = "nextPageToken")]
     next_page_token: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveUploadResumeState {
+    pub source: String,
+    pub session_uri: String,
+    pub confirmed_offset: u64,
+    pub total_size: u64,
+    pub remote_name: String,
+    pub mime_type: String,
+    pub parent_id: Option<String>,
+    pub chunk_size: u64,
+    pub completed: bool,
+}
+
+pub type DriveUploadCheckpointCallback =
+    Arc<dyn Fn(GoogleDriveUploadResumeState) + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleDriveUploadResult {
@@ -496,6 +513,8 @@ pub async fn upload_google_drive_file_with_control(
         transfer_id,
         progress,
         control,
+        None,
+        None,
     )
     .await
 }
@@ -507,6 +526,8 @@ async fn upload_google_drive_file_with_pool(
     transfer_id: String,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
+    resume: Option<GoogleDriveUploadResumeState>,
+    checkpoint_callback: Option<DriveUploadCheckpointCallback>,
 ) -> Result<GoogleDriveUploadResult> {
     validate_chunk_size(request.chunk_size)?;
     checkpoint(control.as_ref()).await?;
@@ -529,37 +550,100 @@ async fn upload_google_drive_file_with_pool(
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
 
-    let (session_uri, session_link) = create_resumable_session_with_failover(
-        &pool,
-        &request.access_token,
-        request.parent_id.as_deref(),
+    let source_key = request.source.to_string_lossy().to_string();
+    let mut resume_offset = 0u64;
+    let mut resumed = false;
+
+    let (session_uri, session_link) = if let Some(saved) = resume
+        .filter(|saved| {
+            !saved.completed
+                && saved.source == source_key
+                && saved.total_size == total_size
+                && saved.remote_name == remote_name
+                && saved.mime_type == mime_type
+                && saved.chunk_size == request.chunk_size
+        })
+    {
+        match query_upload_offset_with_failover(&pool, &saved.session_uri, total_size).await {
+            Ok((offset, link)) => {
+                resume_offset = offset.min(total_size);
+                resumed = true;
+                (saved.session_uri, link)
+            }
+            Err(_) => create_resumable_session_with_failover(
+                &pool,
+                &request.access_token,
+                request.parent_id.as_deref(),
+                &remote_name,
+                &mime_type,
+                total_size,
+                control.as_ref(),
+            )
+            .await?,
+        }
+    } else {
+        create_resumable_session_with_failover(
+            &pool,
+            &request.access_token,
+            request.parent_id.as_deref(),
+            &remote_name,
+            &mime_type,
+            total_size,
+            control.as_ref(),
+        )
+        .await?
+    };
+
+    emit_upload_checkpoint(
+        checkpoint_callback.as_ref(),
+        &source_key,
+        &session_uri,
+        resume_offset,
+        total_size,
         &remote_name,
         &mime_type,
-        total_size,
-        control.as_ref(),
-    )
-    .await?;
+        request.parent_id.clone(),
+        request.chunk_size,
+        resume_offset == total_size,
+    );
 
     emit_upload_progress(
         progress.as_ref(),
         &transfer_id,
         &remote_name,
-        "starting",
+        if resumed { "resumed" } else { "starting" },
         0,
-        0,
+        resume_offset,
         total_size,
         &session_link,
-        false,
+        resume_offset == total_size,
     );
+
+    if resume_offset == total_size && total_size > 0 {
+        return Ok(GoogleDriveUploadResult {
+            id: String::new(),
+            name: remote_name,
+            size: total_size,
+            web_view_link: None,
+            bytes_uploaded: total_size,
+            link_used: session_link.name,
+            local_ip: session_link.local_ip,
+        });
+    }
 
     if total_size == 0 {
         return upload_empty_file(
             &pool,
             &session_uri,
+            &source_key,
             &remote_name,
+            &mime_type,
+            request.parent_id.clone(),
+            request.chunk_size,
             &transfer_id,
             progress,
             control,
+            checkpoint_callback,
         )
         .await;
     }
@@ -572,10 +656,14 @@ async fn upload_google_drive_file_with_pool(
         &mime_type,
         total_size,
         request.chunk_size,
+        resume_offset,
+        &source_key,
+        request.parent_id.clone(),
         &transfer_id,
         progress,
         control,
         throttle,
+        checkpoint_callback,
     )
     .await
 }
@@ -604,6 +692,25 @@ pub async fn upload_google_drive_batch_with_control(
     transfer_id: String,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
+) -> Result<Vec<GoogleDriveUploadResult>> {
+    upload_google_drive_batch_resumable_with_control(
+        request,
+        transfer_id,
+        progress,
+        control,
+        HashMap::new(),
+        None,
+    )
+    .await
+}
+
+pub async fn upload_google_drive_batch_resumable_with_control(
+    request: GoogleDriveBatchUploadRequest,
+    transfer_id: String,
+    progress: Option<ProgressCallback>,
+    control: Option<TransferControl>,
+    resume_sessions: HashMap<String, GoogleDriveUploadResumeState>,
+    checkpoint_callback: Option<DriveUploadCheckpointCallback>,
 ) -> Result<Vec<GoogleDriveUploadResult>> {
     validate_chunk_size(request.chunk_size)?;
     checkpoint(control.as_ref()).await?;
@@ -634,6 +741,9 @@ pub async fn upload_google_drive_batch_with_control(
             break;
         };
 
+        let resume = resume_sessions
+            .get(&source.to_string_lossy().to_string())
+            .cloned();
         spawn_drive_upload_job(
             &mut jobs,
             index,
@@ -646,6 +756,8 @@ pub async fn upload_google_drive_batch_with_control(
             control.clone(),
             pool.clone(),
             throttle.clone(),
+            resume,
+            checkpoint_callback.clone(),
         );
     }
 
@@ -688,6 +800,8 @@ fn spawn_drive_upload_job(
     control: Option<TransferControl>,
     pool: AdaptiveLinkPool,
     throttle: TransferThrottle,
+    resume: Option<GoogleDriveUploadResumeState>,
+    checkpoint_callback: Option<DriveUploadCheckpointCallback>,
 ) {
     jobs.spawn(async move {
         let result = upload_google_drive_file_with_pool(
@@ -705,6 +819,8 @@ fn spawn_drive_upload_job(
             transfer_id,
             progress,
             control,
+            resume,
+            checkpoint_callback,
         )
         .await?;
 
@@ -809,10 +925,15 @@ async fn create_resumable_session_with_failover(
 async fn upload_empty_file(
     pool: &AdaptiveLinkPool,
     session_uri: &str,
+    source: &str,
     remote_name: &str,
+    mime_type: &str,
+    parent_id: Option<String>,
+    chunk_size: u64,
     transfer_id: &str,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
+    checkpoint_callback: Option<DriveUploadCheckpointCallback>,
 ) -> Result<GoogleDriveUploadResult> {
     let mut last_error = None;
 
@@ -852,6 +973,18 @@ async fn upload_empty_file(
                     &link,
                     true,
                 );
+                emit_upload_checkpoint(
+                    checkpoint_callback.as_ref(),
+                    source,
+                    session_uri,
+                    0,
+                    0,
+                    remote_name,
+                    mime_type,
+                    parent_id.clone(),
+                    chunk_size,
+                    true,
+                );
 
                 return Ok(to_result(file, 0, &link));
             }
@@ -886,14 +1019,18 @@ async fn upload_chunks_adaptive(
     mime_type: &str,
     total_size: u64,
     chunk_size: u64,
+    initial_offset: u64,
+    source_key: &str,
+    parent_id: Option<String>,
     transfer_id: &str,
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
     throttle: TransferThrottle,
+    checkpoint_callback: Option<DriveUploadCheckpointCallback>,
 ) -> Result<GoogleDriveUploadResult> {
     let mut file = File::open(source).await?;
-    let mut offset = 0u64;
-    let mut reported_offset = 0u64;
+    let mut offset = initial_offset.min(total_size);
+    let mut reported_offset = offset;
     let mut used_links = BTreeSet::new();
 
     while offset < total_size {
@@ -982,6 +1119,18 @@ async fn upload_chunks_adaptive(
                         &link,
                         true,
                     );
+                    emit_upload_checkpoint(
+                        checkpoint_callback.as_ref(),
+                        source_key,
+                        session_uri,
+                        total_size,
+                        total_size,
+                        remote_name,
+                        mime_type,
+                        parent_id.clone(),
+                        chunk_size,
+                        true,
+                    );
 
                     let mut result = to_result(uploaded, total_size, &link);
                     if used_links.len() > 1 {
@@ -1015,6 +1164,18 @@ async fn upload_chunks_adaptive(
                         );
                         reported_offset = next_offset;
                     }
+                    emit_upload_checkpoint(
+                        checkpoint_callback.as_ref(),
+                        source_key,
+                        session_uri,
+                        next_offset,
+                        total_size,
+                        remote_name,
+                        mime_type,
+                        parent_id.clone(),
+                        chunk_size,
+                        false,
+                    );
 
                     offset = next_offset;
                     break;
@@ -1052,6 +1213,18 @@ async fn upload_chunks_adaptive(
                         );
                         reported_offset = known_offset;
                     }
+                    emit_upload_checkpoint(
+                        checkpoint_callback.as_ref(),
+                        source_key,
+                        session_uri,
+                        known_offset,
+                        total_size,
+                        remote_name,
+                        mime_type,
+                        parent_id.clone(),
+                        chunk_size,
+                        false,
+                    );
 
                     if known_offset != offset {
                         offset = known_offset;
@@ -1094,6 +1267,18 @@ async fn upload_chunks_adaptive(
                         );
                         reported_offset = known_offset;
                     }
+                    emit_upload_checkpoint(
+                        checkpoint_callback.as_ref(),
+                        source_key,
+                        session_uri,
+                        known_offset,
+                        total_size,
+                        remote_name,
+                        mime_type,
+                        parent_id.clone(),
+                        chunk_size,
+                        false,
+                    );
 
                     if known_offset != offset {
                         offset = known_offset;
@@ -1169,6 +1354,33 @@ async fn checkpoint(control: Option<&TransferControl>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn emit_upload_checkpoint(
+    callback: Option<&DriveUploadCheckpointCallback>,
+    source: &str,
+    session_uri: &str,
+    confirmed_offset: u64,
+    total_size: u64,
+    remote_name: &str,
+    mime_type: &str,
+    parent_id: Option<String>,
+    chunk_size: u64,
+    completed: bool,
+) {
+    if let Some(callback) = callback {
+        callback(GoogleDriveUploadResumeState {
+            source: source.to_owned(),
+            session_uri: session_uri.to_owned(),
+            confirmed_offset,
+            total_size,
+            remote_name: remote_name.to_owned(),
+            mime_type: mime_type.to_owned(),
+            parent_id,
+            chunk_size,
+            completed,
+        });
+    }
 }
 
 fn emit_upload_progress(
