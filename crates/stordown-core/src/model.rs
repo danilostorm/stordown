@@ -31,6 +31,8 @@ pub struct DownloadRequest {
     pub connections: usize,
     pub links: Vec<LinkConfig>,
     pub headers: HashMap<String, String>,
+    pub max_bytes_per_second: Option<u64>,
+    pub expected_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +48,8 @@ pub struct DownloadResult {
     pub bytes_written: u64,
     pub segments: usize,
     pub links_used: Vec<String>,
+    pub sha256: Option<String>,
+    pub integrity_verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

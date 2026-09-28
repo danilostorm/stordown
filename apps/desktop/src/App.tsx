@@ -54,6 +54,8 @@ type TransferRecord = {
   created_at: number;
   updated_at: number;
   scheduled_at?: number | null;
+  max_bytes_per_second?: number | null;
+  expected_sha256?: string | null;
   error?: string | null;
 };
 
@@ -84,6 +86,8 @@ export default function App() {
   const [output, setOutput] = useState("C:\\Downloads\\arquivo.bin");
   const [connections, setConnections] = useState(8);
   const [downloadSchedule, setDownloadSchedule] = useState("");
+  const [downloadSpeedLimit, setDownloadSpeedLimit] = useState(0);
+  const [expectedSha256, setExpectedSha256] = useState("");
   const [bindIps, setBindIps] = useState("192.168.30.101, 192.168.30.102");
   const [status, setStatus] = useState("Pronto");
   const [busy, setBusy] = useState(false);
@@ -99,6 +103,7 @@ export default function App() {
   const [driveAuth, setDriveAuth] = useState<GoogleAuthStatus>({ connected: false });
   const [authBusy, setAuthBusy] = useState(false);
   const [chunkMiB, setChunkMiB] = useState(8);
+  const [uploadSpeedLimit, setUploadSpeedLimit] = useState(0);
 
   const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
   const [progressByItem, setProgressByItem] = useState<Record<string, TransferProgress>>({});
@@ -395,6 +400,8 @@ export default function App() {
         scheduledAt: downloadSchedule
           ? Math.floor(new Date(downloadSchedule).getTime() / 1000)
           : null,
+        speedLimitMbps: downloadSpeedLimit > 0 ? downloadSpeedLimit : null,
+        expectedSha256: expectedSha256.trim() || null,
       });
 
       setActiveTransferId(record.id);
@@ -421,6 +428,7 @@ export default function App() {
         parentId: driveParentId || null,
         bindIps: links,
         chunkMib: chunkMiB,
+        speedLimitMbps: uploadSpeedLimit > 0 ? uploadSpeedLimit : null,
         transferId,
       });
 
@@ -713,6 +721,30 @@ export default function App() {
 
             <div className="grid2">
               <label>
+                Limite de velocidade
+                <input
+                  type="number"
+                  min={0}
+                  value={downloadSpeedLimit}
+                  onChange={(event) => setDownloadSpeedLimit(Number(event.target.value))}
+                  placeholder="0 = ilimitado"
+                />
+                <small className="fieldHint">Mbps totais somando todas as WANs. 0 = ilimitado.</small>
+              </label>
+
+              <label>
+                SHA256 esperado — opcional
+                <input
+                  value={expectedSha256}
+                  onChange={(event) => setExpectedSha256(event.target.value)}
+                  placeholder="64 caracteres hexadecimais"
+                />
+                <small className="fieldHint">Se informado, o arquivo só conclui se o hash bater.</small>
+              </label>
+            </div>
+
+            <div className="grid2">
+              <label>
                 Conexões
                 <input
                   type="number"
@@ -769,6 +801,21 @@ export default function App() {
                 </button>
               </div>
             </label>
+
+            <div className="grid2 uploadGrid">
+              <label>
+                Limite de upload
+                <input
+                  type="number"
+                  min={0}
+                  value={uploadSpeedLimit}
+                  onChange={(event) => setUploadSpeedLimit(Number(event.target.value))}
+                  placeholder="0 = ilimitado"
+                />
+                <small className="fieldHint">Mbps totais do lote, compartilhados entre as WANs.</small>
+              </label>
+              <div />
+            </div>
 
             <div className="grid2 uploadGrid">
               <label>
@@ -1158,6 +1205,10 @@ function TransferList({
                   {record.total_bytes ? ` / ${formatBytes(record.total_bytes)}` : ""}
                 </span>
                 <span>{record.bind_ips.length} link(s)</span>
+                {record.max_bytes_per_second ? (
+                  <span>Limite {formatMbps(record.max_bytes_per_second)}</span>
+                ) : null}
+                {record.expected_sha256 ? <span>SHA256 ✓</span> : null}
                 <span>
                   {record.status === "scheduled" && record.scheduled_at
                     ? `Inicia ${formatDate(record.scheduled_at)}`
@@ -1360,6 +1411,10 @@ function formatBytes(value: number) {
   const amount = value / 1024 ** index;
 
   return `${amount >= 100 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+function formatMbps(bytesPerSecond: number) {
+  return `${((bytesPerSecond * 8) / 1_000_000).toFixed(0)} Mbps`;
 }
 
 function formatSpeed(bytesPerSecond: number) {

@@ -5,6 +5,7 @@ use crate::{
         DownloadRequest, DownloadResult, LinkConfig, ProbeResult, ProgressCallback,
         TransferProgress,
     },
+    throttle::TransferThrottle,
 };
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
@@ -13,6 +14,7 @@ use reqwest::{
     Client, StatusCode,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     net::IpAddr,
@@ -208,14 +210,15 @@ async fn download_single(
     let mut pending_delta = 0u64;
     let mut last_emit = Instant::now();
     let item = output_name(&request.output);
+    let throttle = TransferThrottle::new(request.max_bytes_per_second);
 
     while let Some(chunk) = stream.next().await {
         checkpoint(control.as_ref()).await?;
 
         let chunk = chunk?;
-        file.write_all(&chunk).await?;
-
         let delta = chunk.len() as u64;
+        throttle.consume(delta).await;
+        file.write_all(&chunk).await?;
         written += delta;
         pending_delta += delta;
 
@@ -238,6 +241,7 @@ async fn download_single(
     }
 
     file.flush().await?;
+    drop(file);
 
     if pending_delta > 0 {
         emit_progress(
@@ -254,12 +258,15 @@ async fn download_single(
         );
     }
 
+    let (sha256, integrity_verified) =
+        verify_sha256(&request.output, request.expected_sha256.as_deref()).await?;
+
     emit_progress(
         progress.as_ref(),
         &transfer_id,
         "download",
         &item,
-        "completed",
+        if integrity_verified { "verified" } else { "completed" },
         0,
         written,
         total_size.or(Some(written)),
@@ -272,6 +279,8 @@ async fn download_single(
         bytes_written: written,
         segments: 1,
         links_used: vec![link.name.clone()],
+        sha256,
+        integrity_verified,
     })
 }
 
@@ -293,6 +302,7 @@ async fn download_segmented(
     prepare_part_dir(&part_dir, &request.url, size, segments).await?;
 
     let pool = AdaptiveLinkPool::new(links.clone());
+    let throttle = TransferThrottle::new(request.max_bytes_per_second);
     let aggregate = Arc::new(AtomicU64::new(0));
     let item = output_name(&request.output);
     let mut jobs: JoinSet<Result<(usize, u64, Vec<String>)>> = JoinSet::new();
@@ -312,6 +322,7 @@ async fn download_segmented(
             progress.clone(),
             control.clone(),
             pool.clone(),
+            throttle.clone(),
         );
         next_index += 1;
     }
@@ -338,6 +349,7 @@ async fn download_segmented(
                 progress.clone(),
                 control.clone(),
                 pool.clone(),
+                throttle.clone(),
             );
             next_index += 1;
         }
@@ -349,6 +361,8 @@ async fn download_segmented(
 
     checkpoint(control.as_ref()).await?;
     assemble_parts(&part_dir, &request.output, segments).await?;
+    let (sha256, integrity_verified) =
+        verify_sha256(&request.output, request.expected_sha256.as_deref()).await?;
     fs::remove_dir_all(&part_dir).await?;
 
     if let Some(link) = links.first() {
@@ -357,7 +371,7 @@ async fn download_segmented(
             &transfer_id,
             "download",
             &item,
-            "completed",
+            if integrity_verified { "verified" } else { "completed" },
             0,
             size,
             Some(size),
@@ -371,6 +385,8 @@ async fn download_segmented(
         bytes_written: total,
         segments,
         links_used: used.into_iter().collect(),
+        sha256,
+        integrity_verified,
     })
 }
 
@@ -388,6 +404,7 @@ fn spawn_segment_job(
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
     pool: AdaptiveLinkPool,
+    throttle: TransferThrottle,
 ) {
     let (start, end) = segment_bounds(size, segments, index);
     let url = request.url.clone();
@@ -410,6 +427,7 @@ fn spawn_segment_job(
             progress,
             control,
             pool,
+            throttle,
         )
         .await
         .map(|(bytes, links)| (index, bytes, links))
@@ -430,6 +448,7 @@ async fn download_range_resumable(
     progress: Option<ProgressCallback>,
     control: Option<TransferControl>,
     pool: AdaptiveLinkPool,
+    throttle: TransferThrottle,
 ) -> Result<(u64, Vec<String>)> {
     let expected = end - start + 1;
     let mut existing = part_len(part_path).await;
@@ -581,9 +600,9 @@ async fn download_range_resumable(
 
             match next {
                 Ok(chunk) => {
-                    file.write_all(&chunk).await?;
-
                     let delta = chunk.len() as u64;
+                    throttle.consume(delta).await;
+                    file.write_all(&chunk).await?;
                     attempt_bytes += delta;
                     pending_delta += delta;
                     let overall = aggregate.fetch_add(delta, Ordering::Relaxed) + delta;
@@ -710,6 +729,44 @@ async fn checkpoint(control: Option<&TransferControl>) -> Result<()> {
 
 fn retry_backoff(attempt: usize) -> Duration {
     Duration::from_millis(400 * 2u64.pow((attempt.saturating_sub(1)).min(4) as u32))
+}
+
+async fn verify_sha256(path: &Path, expected: Option<&str>) -> Result<(Option<String>, bool)> {
+    let Some(expected) = expected
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok((None, false));
+    };
+
+    let expected = expected
+        .trim_start_matches("sha256:")
+        .trim()
+        .to_ascii_lowercase();
+
+    if expected.len() != 64 || !expected.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        bail!("expected SHA256 must contain exactly 64 hexadecimal characters");
+    }
+
+    let mut file = File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    let actual = format!("{:x}", hasher.finalize());
+
+    if actual != expected {
+        bail!("SHA256 mismatch: expected {expected}, got {actual}");
+    }
+
+    Ok((Some(actual), true))
 }
 
 fn emit_progress(

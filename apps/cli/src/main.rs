@@ -29,6 +29,12 @@ enum Command {
 
         #[arg(long = "bind", required = true)]
         bind: Vec<IpAddr>,
+
+        #[arg(long)]
+        limit_mbps: Option<u64>,
+
+        #[arg(long)]
+        sha256: Option<String>,
     },
 
     UploadDrive {
@@ -43,6 +49,9 @@ enum Command {
 
         #[arg(long, default_value_t = 8)]
         chunk_mib: u64,
+
+        #[arg(long)]
+        limit_mbps: Option<u64>,
     },
 }
 
@@ -56,6 +65,8 @@ async fn main() -> Result<()> {
             output,
             connections,
             bind,
+            limit_mbps,
+            sha256,
         } => {
             if bind.is_empty() {
                 bail!("provide at least one --bind IP");
@@ -70,6 +81,8 @@ async fn main() -> Result<()> {
                 connections,
                 links,
                 headers: HashMap::new(),
+                max_bytes_per_second: limit_mbps.and_then(mbps_to_bytes_per_second),
+                expected_sha256: sha256,
             })
             .await?;
 
@@ -84,6 +97,7 @@ async fn main() -> Result<()> {
             bind,
             parent_id,
             chunk_mib,
+            limit_mbps,
         } => {
             if bind.is_empty() {
                 bail!("provide at least one --bind IP");
@@ -108,6 +122,7 @@ async fn main() -> Result<()> {
                 parent_id,
                 chunk_size,
                 links: build_links(bind),
+                max_bytes_per_second: limit_mbps.and_then(mbps_to_bytes_per_second),
             })
             .await?;
 
@@ -136,4 +151,9 @@ fn build_links(bind: Vec<IpAddr>) -> Vec<LinkConfig> {
             weight: 1,
         })
         .collect()
+}
+
+
+fn mbps_to_bytes_per_second(mbps: u64) -> Option<u64> {
+    mbps.checked_mul(1_000_000)?.checked_div(8)
 }

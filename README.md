@@ -32,6 +32,8 @@ The repository currently contains:
 - persistent HTTP download scheduler with restart recovery;
 - adaptive Multi-WAN chunk scheduling with automatic link failover;
 - adaptive Google Drive batch assignment with resumable chunk failover;
+- per-transfer aggregate speed limits for HTTP downloads and Drive upload batches;
+- optional SHA256 verification before HTTP downloads are marked complete;
 - GitHub Actions CI.
 
 This is still an early proof of concept, not a production release.
@@ -314,3 +316,12 @@ The Chrome/Edge extension can now capture downloads that depend on an authentica
 The user authorizes an individual website from the extension popup. Only then does the extension read cookies for that origin and attach a controlled `Cookie` header plus the download referrer to the Native Messaging request.
 
 The desktop sanitizes incoming browser headers against an allowlist and keeps them in memory for the HTTP transfer rather than storing cookie values in the normal SQLite history.
+
+
+## Speed limits and integrity verification
+
+StorDown now supports an optional aggregate speed cap per transfer. The limit is entered in Mbps and is shared by all workers/WANs belonging to that transfer, so an 80 Mbps cap means approximately 80 Mbps total rather than 80 Mbps per interface.
+
+HTTP downloads also accept an optional expected SHA256 value. After the final file is assembled, StorDown streams the file through SHA256 verification before marking the transfer complete. A mismatch fails the transfer and reports both expected and calculated hashes.
+
+Scheduled downloads persist both the speed limit and expected SHA256 in SQLite, so those options survive a StorDown restart.
