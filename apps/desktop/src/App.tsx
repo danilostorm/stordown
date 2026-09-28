@@ -1195,49 +1195,55 @@ export default function App() {
 
         <nav>
           <button
+            className={`navItem ${view === "home" ? "active" : ""}`}
+            onClick={() => setView("home")}
+          >
+            <span className="navIcon">⌂</span> Visão geral
+          </button>
+          <button
             className={`navItem ${view === "download" ? "active" : ""}`}
             onClick={() => setView("download")}
           >
-            Downloads
+            <span className="navIcon">↓</span> Novo download
           </button>
           <button
             className={`navItem ${view === "upload" ? "active" : ""}`}
             onClick={() => setView("upload")}
           >
-            Uploads
+            <span className="navIcon">↑</span> Novo upload
           </button>
           <button
             className={`navItem navCount ${view === "queue" ? "active" : ""}`}
             onClick={() => setView("queue")}
           >
-            <span>Fila</span>
+            <span><span className="navIcon">≡</span> Transferências</span>
             <b>{queuedRecords.length}</b>
           </button>
           <button
             className={`navItem navCount ${view === "scheduled" ? "active" : ""}`}
             onClick={() => setView("scheduled")}
           >
-            <span>Agendador</span>
+            <span><span className="navIcon">◷</span> Agendados</span>
             <b>{scheduledRecords.length}</b>
           </button>
           <button
             className={`navItem navCount ${view === "finished" ? "active" : ""}`}
             onClick={() => setView("finished")}
           >
-            <span>Finalizados</span>
+            <span><span className="navIcon">✓</span> Histórico</span>
             <b>{finishedRecords.length}</b>
           </button>
           <button
             className={`navItem ${view === "cloud" ? "active" : ""}`}
             onClick={openCloudWorkspace}
           >
-            Cloud
+            <span className="navIcon">☁</span> Google Drive
           </button>
           <button
             className={`navItem ${view === "settings" ? "active" : ""}`}
             onClick={() => setView("settings")}
           >
-            Configurações
+            <span className="navIcon">⚙</span> Configurações
           </button>
         </nav>
 
