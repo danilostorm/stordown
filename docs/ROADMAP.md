@@ -36,7 +36,8 @@
 ## V0.3 - Browser integration
 
 - [x] Windows native-messaging host
-- [ ] One-click Chrome/Edge installer
+- [x] One-click Chrome/Edge Native Messaging registration from desktop
+- [ ] Published/signed browser extension package for store-style installation
 - [x] Automatic interception for direct HTTP/HTTPS downloads
 - [x] Controlled per-site cookie/header handoff
 - [x] Download all links from the active page
