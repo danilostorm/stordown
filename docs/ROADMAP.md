@@ -52,7 +52,7 @@
 - [ ] Shared links / public Drive link import
 - [x] Range-aware blob-file Drive downloads with Smart Multi-WAN
 - [ ] Persist and resume Drive upload sessions after restart
-- [ ] Google Workspace document export
+- [x] Google Workspace document export (Docs/Sheets/Slides/Drawings/Apps Script)
 - [ ] Rclone remote adapter
 
 ## V0.5 - Multi-WAN upload acceleration
