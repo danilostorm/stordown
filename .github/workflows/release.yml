@@ -1,0 +1,102 @@
+name: Release Windows
+
+on:
+  push:
+    branches:
+      - "release/v0.1.0-alpha.1"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build and publish v0.1.0-alpha.1
+    runs-on: windows-latest
+    env:
+      TAG: v0.1.0-alpha.1
+      STORDOWN_GOOGLE_CLIENT_ID: ${{ secrets.STORDOWN_GOOGLE_CLIENT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm install
+
+      - name: Build Native Host and Relay
+        run: cargo build --release -p stordown-native-host -p stordown-relay
+
+      - name: Test Rust workspace
+        run: cargo test --workspace
+
+      - name: Build Windows installer
+        working-directory: apps/desktop
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Package release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+
+          $installer = Get-ChildItem -Path . -Filter "*.exe" -Recurse | Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" } | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer was not found after Tauri build" }
+          Copy-Item $installer.FullName "release-assets/StorDown-v0.1.0-alpha.1-Windows-x64-Setup.exe"
+
+          if (-not (Test-Path "target/release/stordown-native-host.exe")) { throw "stordown-native-host.exe was not built" }
+          if (-not (Test-Path "target/release/stordown-relay.exe")) { throw "stordown-relay.exe was not built" }
+
+          New-Item -ItemType Directory -Force -Path "release-work/native-host" | Out-Null
+          Copy-Item "target/release/stordown-native-host.exe" "release-work/native-host/"
+          Copy-Item "browser-extension/native-host-manifest.example.json" "release-work/native-host/"
+          Compress-Archive -Path "release-work/native-host/*" -DestinationPath "release-assets/StorDown-Native-Host-v0.1.0-alpha.1.zip" -Force
+
+          Compress-Archive -Path "browser-extension/*" -DestinationPath "release-assets/StorDown-Browser-Extension-v0.1.0-alpha.1.zip" -Force
+
+          New-Item -ItemType Directory -Force -Path "release-work/relay" | Out-Null
+          Copy-Item "target/release/stordown-relay.exe" "release-work/relay/"
+          Copy-Item "apps/relay/Dockerfile" "release-work/relay/"
+          Copy-Item "docs/RELAY.md" "release-work/relay/"
+          Compress-Archive -Path "release-work/relay/*" -DestinationPath "release-assets/StorDown-Relay-v0.1.0-alpha.1-Windows-x64.zip" -Force
+
+          $lines = Get-ChildItem "release-assets" -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $lines | Set-Content -Encoding ascii "release-assets/SHA256SUMS.txt"
+
+          Get-ChildItem "release-assets" -File | Format-Table Name, Length
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stordown-v0.1.0-alpha.1-windows
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Create or update GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $env:TAG --target $env:GITHUB_SHA --title "StorDown v0.1.0-alpha.1" --notes-file RELEASE_NOTES.md --prerelease
+          } else {
+            gh release create $env:TAG --target $env:GITHUB_SHA --title "StorDown v0.1.0-alpha.1" --notes-file RELEASE_NOTES.md --prerelease
+          }
+
+          Get-ChildItem "release-assets" -File | ForEach-Object {
+            gh release upload $env:TAG $_.FullName --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload $($_.Name)" }
+          }
