@@ -25,6 +25,7 @@ use tokio::{
     task::JoinSet,
     time::sleep,
 };
+use url::Url;
 
 const DRIVE_UPLOAD_URL: &str =
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id,name,size,webViewLink";
@@ -81,6 +82,13 @@ pub struct GoogleDriveItem {
     pub md5_checksum: Option<String>,
     pub is_folder: bool,
     pub is_google_workspace: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoogleDriveExportFormat {
+    pub label: String,
+    pub mime_type: String,
+    pub extension: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,6 +269,72 @@ pub fn google_drive_media_url(file_id: &str) -> String {
         "https://www.googleapis.com/drive/v3/files/{}?alt=media&supportsAllDrives=true",
         file_id.trim()
     )
+}
+
+
+pub fn google_drive_export_formats(source_mime: &str) -> Vec<GoogleDriveExportFormat> {
+    fn format(label: &str, mime_type: &str, extension: &str) -> GoogleDriveExportFormat {
+        GoogleDriveExportFormat {
+            label: label.to_string(),
+            mime_type: mime_type.to_string(),
+            extension: extension.to_string(),
+        }
+    }
+
+    match source_mime {
+        "application/vnd.google-apps.document" => vec![
+            format(
+                "Microsoft Word (.docx)",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".docx",
+            ),
+            format("PDF (.pdf)", "application/pdf", ".pdf"),
+            format("Texto (.txt)", "text/plain", ".txt"),
+            format("Markdown (.md)", "text/markdown", ".md"),
+            format("EPUB (.epub)", "application/epub+zip", ".epub"),
+        ],
+        "application/vnd.google-apps.spreadsheet" => vec![
+            format(
+                "Microsoft Excel (.xlsx)",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".xlsx",
+            ),
+            format("PDF (.pdf)", "application/pdf", ".pdf"),
+            format("CSV - primeira planilha (.csv)", "text/csv", ".csv"),
+        ],
+        "application/vnd.google-apps.presentation" => vec![
+            format(
+                "Microsoft PowerPoint (.pptx)",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".pptx",
+            ),
+            format("PDF (.pdf)", "application/pdf", ".pdf"),
+            format("Texto (.txt)", "text/plain", ".txt"),
+        ],
+        "application/vnd.google-apps.drawing" => vec![
+            format("PDF (.pdf)", "application/pdf", ".pdf"),
+            format("PNG (.png)", "image/png", ".png"),
+            format("JPEG (.jpg)", "image/jpeg", ".jpg"),
+            format("SVG (.svg)", "image/svg+xml", ".svg"),
+        ],
+        "application/vnd.google-apps.script" => vec![
+            format(
+                "Apps Script JSON (.json)",
+                "application/vnd.google-apps.script+json",
+                ".json",
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+pub fn google_drive_export_url(file_id: &str, export_mime: &str) -> Result<String> {
+    let mut url = Url::parse(&format!(
+        "https://www.googleapis.com/drive/v3/files/{}/export",
+        file_id.trim()
+    ))?;
+    url.query_pairs_mut().append_pair("mimeType", export_mime);
+    Ok(url.to_string())
 }
 
 pub async fn list_google_drive_folders(
@@ -1182,10 +1256,29 @@ fn backoff(attempt: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::{
-        escape_drive_query_literal, google_drive_media_url, next_offset_from_range,
-        validate_chunk_size,
+        escape_drive_query_literal, google_drive_export_formats, google_drive_export_url,
+        google_drive_media_url, next_offset_from_range, validate_chunk_size,
     };
     use reqwest::header::HeaderValue;
+
+    #[test]
+    fn workspace_export_formats_include_office_defaults() {
+        let docs = google_drive_export_formats("application/vnd.google-apps.document");
+        assert_eq!(docs.first().unwrap().extension, ".docx");
+
+        let sheets = google_drive_export_formats("application/vnd.google-apps.spreadsheet");
+        assert_eq!(sheets.first().unwrap().extension, ".xlsx");
+
+        let slides = google_drive_export_formats("application/vnd.google-apps.presentation");
+        assert_eq!(slides.first().unwrap().extension, ".pptx");
+    }
+
+    #[test]
+    fn export_url_encodes_mime_type() {
+        let url = google_drive_export_url("abc123", "application/pdf").unwrap();
+        assert!(url.contains("/abc123/export?"));
+        assert!(url.contains("mimeType=application%2Fpdf"));
+    }
 
     #[test]
     fn media_url_targets_drive_content_endpoint() {
