@@ -16,12 +16,12 @@ use stordown_core::{
     authorize_google_drive_desktop, download_direct_with_control, download_with_control,
     google_drive_export_formats, google_drive_export_url, google_drive_media_url,
     list_google_drive_folders, list_google_drive_items_with_resource_key,
-    list_google_shared_drives, probe_links,
+    list_google_shared_drives, probe, probe_links,
     refresh_google_access_token, resolve_google_drive_shared_link,
     upload_google_drive_batch_resumable_with_control, DownloadRequest,
     DriveUploadCheckpointCallback,
     GoogleDriveBatchUploadRequest, GoogleDriveExportFormat, GoogleDriveFolder, GoogleDriveItem,
-    GoogleDriveUploadResumeState, GoogleSharedDrive, LinkConfig, LinkProbeStatus,
+    GoogleDriveUploadResumeState, GoogleSharedDrive, LinkConfig, LinkProbeStatus, ProbeResult,
     ProgressCallback, TransferControl,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -75,6 +75,17 @@ struct BrowserIntegrationResult {
     native_host_path: String,
     chrome_registered: bool,
     edge_registered: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DesktopDefaults {
+    download_dir: String,
+    interfaces: Vec<NetworkInterfaceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserExtensionPrepared {
+    extension_dir: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1724,29 +1735,76 @@ fn validate_extension_id(value: &str) -> Result<String, String> {
     Ok(value)
 }
 
-fn native_host_source_path() -> Result<PathBuf, String> {
+fn native_host_source_path(app: &AppHandle) -> Result<PathBuf, String> {
     let current = env::current_exe()
         .map_err(|error| format!("Falha ao localizar o executável do StorDown: {error}"))?;
     let directory = current
         .parent()
         .ok_or_else(|| "Pasta do StorDown não encontrada".to_string())?;
+    let resource_dir = app.path().resource_dir().ok();
 
-    let candidates = [
+    let mut candidates = vec![
         directory.join("stordown-native-host.exe"),
         directory.join("resources").join("stordown-native-host.exe"),
+    ];
+
+    if let Some(resource_dir) = resource_dir {
+        candidates.push(resource_dir.join("stordown-native-host.exe"));
+        candidates.push(resource_dir.join("target").join("release").join("stordown-native-host.exe"));
+    }
+
+    candidates.push(
         directory
             .parent()
             .map(|parent| parent.join("stordown-native-host.exe"))
             .unwrap_or_default(),
-    ];
+    );
 
     candidates
         .into_iter()
         .find(|path| path.is_file())
         .ok_or_else(|| {
-            "stordown-native-host.exe não foi encontrado ao lado do StorDown. Em desenvolvimento, compile com: cargo build -p stordown-native-host"
+            "stordown-native-host.exe não foi encontrado no pacote do StorDown."
                 .to_string()
         })
+}
+
+fn bundled_extension_source(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("browser-extension"));
+        candidates.push(resource_dir.join("resources").join("browser-extension"));
+    }
+
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../browser-extension"),
+    );
+
+    candidates
+        .into_iter()
+        .find(|path| path.join("manifest.json").is_file())
+        .ok_or_else(|| "Extensão do StorDown não foi encontrada no pacote.".to_string())
+}
+
+fn copy_extension_files(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("Falha ao criar pasta da extensão: {error}"))?;
+
+    for entry in std::fs::read_dir(source)
+        .map_err(|error| format!("Falha ao ler extensão empacotada: {error}"))?
+    {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+
+        if path.is_file() {
+            std::fs::copy(&path, destination.join(entry.file_name()))
+                .map_err(|error| format!("Falha ao copiar arquivo da extensão: {error}"))?;
+        }
+    }
+
+    Ok(())
 }
 
 fn register_native_host_key(key: &str, manifest_path: &Path) -> Result<(), String> {
@@ -1772,9 +1830,12 @@ fn register_native_host_key(key: &str, manifest_path: &Path) -> Result<(), Strin
 }
 
 #[tauri::command]
-fn install_browser_integration(extension_id: String) -> Result<BrowserIntegrationResult, String> {
+fn install_browser_integration(
+    extension_id: String,
+    app: AppHandle,
+) -> Result<BrowserIntegrationResult, String> {
     let extension_id = validate_extension_id(&extension_id)?;
-    let source = native_host_source_path()?;
+    let source = native_host_source_path(&app)?;
 
     let local_app_data = env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -1822,6 +1883,64 @@ fn install_browser_integration(extension_id: String) -> Result<BrowserIntegratio
         chrome_registered,
         edge_registered,
     })
+}
+
+#[tauri::command]
+fn prepare_browser_extension(app: AppHandle) -> Result<BrowserExtensionPrepared, String> {
+    let source = bundled_extension_source(&app)?;
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA não está disponível neste Windows".to_string())?;
+    let destination = local_app_data
+        .join("StorDown")
+        .join("BrowserExtension");
+
+    copy_extension_files(&source, &destination)?;
+
+    Command::new("explorer.exe")
+        .arg(&destination)
+        .spawn()
+        .map_err(|error| format!("Extensão preparada, mas não foi possível abrir a pasta: {error}"))?;
+
+    Ok(BrowserExtensionPrepared {
+        extension_dir: destination.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn get_desktop_defaults(app: AppHandle) -> Result<DesktopDefaults, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Falha ao localizar AppData: {error}"))?;
+    let download_dir = app
+        .path()
+        .download_dir()
+        .unwrap_or_else(|_| app_data.join("Downloads"));
+    std::fs::create_dir_all(&download_dir)
+        .map_err(|error| format!("Falha ao preparar a pasta de Downloads: {error}"))?;
+
+    Ok(DesktopDefaults {
+        download_dir: download_dir.to_string_lossy().to_string(),
+        interfaces: discover_windows_interfaces().unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
+async fn inspect_download_url(url: String) -> Result<ProbeResult, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Informe uma URL".to_string());
+    }
+
+    probe(trimmed).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pick_download_folder() -> Result<Option<String>, String> {
+    Ok(rfd::FileDialog::new()
+        .pick_folder()
+        .map(|path| path.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -2080,7 +2199,10 @@ fn main() {
             delete_transfer_history,
             clear_finished_history,
             install_browser_integration,
+            prepare_browser_extension,
             open_browser_extensions,
+            get_desktop_defaults,
+            inspect_download_url,
             list_download_rules,
             save_download_rule,
             delete_download_rule,
@@ -2089,6 +2211,7 @@ fn main() {
             resume_transfer,
             cancel_transfer,
             pick_download_destination,
+            pick_download_folder,
             pick_upload_files,
             test_routes,
             list_network_interfaces,
