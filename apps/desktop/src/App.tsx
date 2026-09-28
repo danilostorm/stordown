@@ -2206,6 +2206,7 @@ function TransferList({
   onResume,
   onCancel,
   onDelete,
+  liveStats = {},
 }: {
   records: TransferRecord[];
   emptyText: string;
@@ -2215,23 +2216,30 @@ function TransferList({
   onResume: (id: string) => void;
   onCancel: (id: string) => void;
   onDelete: (id: string) => void;
+  liveStats?: Record<string, LiveTransferStats>;
 }) {
   if (records.length === 0) {
     return <div className="emptyState">{emptyText}</div>;
   }
 
   return (
-    <section className="transferList">
+    <section className="transferList managerTransferList">
       {records.map((record) => {
+        const live = liveStats[record.id];
+        const currentBytes = Math.max(record.bytes_transferred, live?.bytesTransferred ?? 0);
+        const total = live?.totalBytes ?? record.total_bytes ?? null;
         const percent =
-          record.total_bytes && record.total_bytes > 0
-            ? Math.min(100, (record.bytes_transferred / record.total_bytes) * 100)
+          total && total > 0
+            ? Math.min(100, (currentBytes / total) * 100)
             : 0;
+        const speed = record.status === "running" ? live?.speed ?? 0 : 0;
+        const remaining = total ? Math.max(0, total - currentBytes) : 0;
+        const etaSeconds = speed > 0 && remaining > 0 ? remaining / speed : null;
 
         return (
           <article
             key={record.id}
-            className={`transferRow ${selectedId === record.id ? "selected" : ""}`}
+            className={`transferRow managerTransferRow ${selectedId === record.id ? "selected" : ""}`}
             onClick={() => onSelect(record.id)}
           >
             <div className="transferKind">
@@ -2248,13 +2256,16 @@ function TransferList({
                 <div className="miniFill" style={{ width: `${percent}%` }} />
               </div>
 
-              <div className="transferMeta">
+              <div className="transferMeta transferMetaManager">
                 <span>{record.provider === "google_drive" ? "Google Drive" : "HTTP/HTTPS"}</span>
                 <span>
-                  {formatBytes(record.bytes_transferred)}
-                  {record.total_bytes ? ` / ${formatBytes(record.total_bytes)}` : ""}
+                  {formatBytes(currentBytes)}
+                  {total ? ` / ${formatBytes(total)}` : ""}
                 </span>
-                <span>{record.bind_ips.length} link(s)</span>
+                <span>{percent > 0 ? `${percent.toFixed(1)}%` : "—"}</span>
+                <span className="liveSpeed">{speed > 0 ? formatSpeed(speed) : "0 B/s"}</span>
+                {etaSeconds !== null && <span>Restante {formatDuration(etaSeconds)}</span>}
+                <span>{record.bind_ips.length || 1} link(s)</span>
                 {record.max_bytes_per_second ? (
                   <span>Limite {formatMbps(record.max_bytes_per_second)}</span>
                 ) : null}
