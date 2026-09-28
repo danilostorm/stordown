@@ -13,7 +13,8 @@ The repository currently contains:
 - per-worker bind to local IPv4/IPv6 addresses;
 - multiple enabled links with weights;
 - Google Drive resumable upload engine;
-- native Google Drive folder picker with My Drive + Shared Drives browsing;
+- native Google Drive browser with My Drive + Shared Drives browsing;
+- Range-aware Google Drive blob downloads through the Smart Multi-WAN engine;
 - multiple-file Drive upload distribution across NICs/WANs;
 - CLI proof of concept for downloads and Drive uploads;
 - Tauri + React desktop interface with Download and Upload workspaces;
@@ -102,7 +103,7 @@ cargo run -p stordown-cli -- upload-drive `
   --chunk-mib 8
 ```
 
-OAuth login inside StorDown is the next Drive milestone, so users will not need to handle access tokens manually.
+The desktop app uses its built-in OAuth flow; the environment-token example above is only for CLI development.
 
 ## Desktop development
 
@@ -353,4 +354,24 @@ The Upload workspace no longer requires users to manually copy a Google Drive fo
 - nested folder navigation;
 - selecting the current folder as the upload destination.
 
-Older OAuth sessions may need to reconnect once because folder browsing adds the read-only Drive metadata scope.
+Older OAuth sessions need to reconnect once because native Drive downloads add the restricted `drive.readonly` content scope. Public distribution will require Google's corresponding OAuth verification.
+
+
+## Google Drive Multi-WAN downloads
+
+The **Cloud** workspace now lists files as well as folders from My Drive and Shared Drives. For normal binary/blob files, **Baixar** opens the Windows destination picker and places the transfer into the StorDown queue as a Google Drive job.
+
+Drive blob content is requested with `files.get?alt=media`. Google supports HTTP byte ranges on these downloads, so StorDown can use the same segmented Smart Multi-WAN engine as a normal HTTP source:
+
+```text
+Google Drive file
+      |
+      +-- Range 0 -> WAN1
+      +-- Range 1 -> WAN2
+      +-- Range 2 -> adaptive scheduler
+      +-- failed Range -> healthy WAN
+      |
+      -> assembled Windows file
+```
+
+Google Workspace-native documents are shown in the browser but direct Range download is disabled until the separate export workflow is implemented.
