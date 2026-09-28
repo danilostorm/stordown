@@ -51,7 +51,7 @@
 - [x] Shared Drive browsing
 - [ ] Shared links / public Drive link import
 - [x] Range-aware blob-file Drive downloads with Smart Multi-WAN
-- [ ] Persist and resume Drive upload sessions after restart
+- [x] Persist and resume Drive upload sessions after restart
 - [x] Google Workspace document export (Docs/Sheets/Slides/Drawings/Apps Script)
 - [ ] Rclone remote adapter
 
