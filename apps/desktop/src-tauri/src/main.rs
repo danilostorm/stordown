@@ -15,7 +15,8 @@ use std::{
 use stordown_core::{
     authorize_google_drive_desktop, download_direct_with_control, download_with_control,
     google_drive_export_formats, google_drive_export_url, google_drive_media_url,
-    list_google_drive_folders, list_google_drive_items, list_google_shared_drives, probe_links,
+    list_google_drive_folders, list_google_drive_items_with_resource_key,
+    list_google_shared_drives, probe_links,
     refresh_google_access_token, resolve_google_drive_shared_link,
     upload_google_drive_batch_resumable_with_control,
     upload_google_drive_batch_with_control, DownloadRequest, DriveUploadCheckpointCallback,
@@ -443,14 +444,16 @@ async fn browse_google_drive_folders(
 async fn browse_google_drive_items(
     parent_id: Option<String>,
     drive_id: Option<String>,
+    resource_key: Option<String>,
     state: State<'_, GoogleAuthState>,
 ) -> Result<Vec<GoogleDriveItem>, String> {
     let access_token = current_google_access_token(state.inner()).await?;
 
-    list_google_drive_items(
+    list_google_drive_items_with_resource_key(
         &access_token,
         parent_id.as_deref(),
         drive_id.as_deref(),
+        resource_key.as_deref(),
     )
     .await
     .map_err(|error| error.to_string())
