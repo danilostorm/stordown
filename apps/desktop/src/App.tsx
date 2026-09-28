@@ -38,6 +38,7 @@ type GoogleDriveItem = {
   mime_type: string;
   size?: number | null;
   drive_id?: string | null;
+  resource_key?: string | null;
   can_download: boolean;
   md5_checksum?: string | null;
   is_folder: boolean;
@@ -58,6 +59,7 @@ type GoogleSharedDrive = {
 type DriveBreadcrumb = {
   id: string | null;
   name: string;
+  resource_key?: string | null;
 };
 
 type TransferProgress = {
@@ -151,6 +153,9 @@ export default function App() {
   ]);
   const [cloudItems, setCloudItems] = useState<GoogleDriveItem[]>([]);
   const [cloudBusy, setCloudBusy] = useState(false);
+  const [sharedDriveLink, setSharedDriveLink] = useState("");
+  const [sharedLinkBusy, setSharedLinkBusy] = useState(false);
+  const [sharedLinkItem, setSharedLinkItem] = useState<GoogleDriveItem | null>(null);
   const [cloudDriveId, setCloudDriveId] = useState<string | null>(null);
   const [cloudBreadcrumbs, setCloudBreadcrumbs] = useState<DriveBreadcrumb[]>([
     { id: null, name: "Meu Drive" },
@@ -509,6 +514,7 @@ export default function App() {
   async function loadCloudItems(
     parentId: string | null,
     driveId: string | null,
+    resourceKey: string | null = null,
   ) {
     if (!driveAuth.connected) {
       setCloudItems([]);
@@ -521,6 +527,7 @@ export default function App() {
       const items = await invoke<GoogleDriveItem[]>("browse_google_drive_items", {
         parentId,
         driveId,
+        resourceKey,
       });
       setCloudItems(items);
     } catch (error) {
@@ -551,7 +558,7 @@ export default function App() {
       setSharedDrives(drives);
       setCloudDriveId(null);
       setCloudBreadcrumbs([{ id: null, name: "Meu Drive" }]);
-      await loadCloudItems(null, null);
+      await loadCloudItems(null, null, null);
       setStatus("Google Drive carregado");
     } catch (error) {
       setStatus(`Erro ao abrir Google Drive: ${String(error)}`);
@@ -563,7 +570,7 @@ export default function App() {
     const driveId = drive?.id ?? null;
     setCloudDriveId(driveId);
     setCloudBreadcrumbs([{ id: driveId, name: drive?.name ?? "Meu Drive" }]);
-    await loadCloudItems(driveId, driveId);
+    await loadCloudItems(driveId, driveId, null);
   }
 
   async function enterCloudFolder(item: GoogleDriveItem) {
@@ -571,9 +578,9 @@ export default function App() {
 
     setCloudBreadcrumbs((current) => [
       ...current,
-      { id: item.id, name: item.name },
+      { id: item.id, name: item.name, resource_key: item.resource_key ?? null },
     ]);
-    await loadCloudItems(item.id, cloudDriveId);
+    await loadCloudItems(item.id, cloudDriveId, item.resource_key ?? null);
   }
 
   async function cloudBack() {
@@ -582,7 +589,57 @@ export default function App() {
     const next = cloudBreadcrumbs.slice(0, -1);
     const parent = next[next.length - 1];
     setCloudBreadcrumbs(next);
-    await loadCloudItems(parent.id, cloudDriveId);
+    await loadCloudItems(parent.id, cloudDriveId, parent.resource_key ?? null);
+  }
+
+  async function importSharedDriveLink() {
+    if (!sharedDriveLink.trim()) {
+      setStatus("Cole um link compartilhado do Google Drive.");
+      return;
+    }
+
+    if (!driveAuth.connected) {
+      setStatus("Conecte o Google Drive antes de importar um link compartilhado.");
+      return;
+    }
+
+    setSharedLinkBusy(true);
+
+    try {
+      const item = await invoke<GoogleDriveItem>("resolve_drive_shared_link", {
+        sharedLink: sharedDriveLink.trim(),
+      });
+      setSharedLinkItem(item);
+      setStatus(`Link reconhecido: ${item.name}`);
+    } catch (error) {
+      setSharedLinkItem(null);
+      setStatus(`Erro ao abrir link compartilhado: ${String(error)}`);
+    } finally {
+      setSharedLinkBusy(false);
+    }
+  }
+
+  async function openSharedDriveItem(item: GoogleDriveItem) {
+    if (item.is_folder) {
+      setCloudDriveId(item.drive_id ?? null);
+      setCloudBreadcrumbs([
+        {
+          id: item.id,
+          name: item.name,
+          resource_key: item.resource_key ?? null,
+        },
+      ]);
+      await loadCloudItems(
+        item.id,
+        item.drive_id ?? null,
+        item.resource_key ?? null,
+      );
+      setSharedLinkItem(null);
+      setStatus(`Pasta compartilhada aberta: ${item.name}`);
+      return;
+    }
+
+    await downloadCloudItem(item);
   }
 
   async function openWorkspaceExport(item: GoogleDriveItem) {
@@ -634,6 +691,7 @@ export default function App() {
         sourceMime: item.mime_type,
         exportMime: format.mime_type,
         extension: format.extension,
+        resourceKey: item.resource_key ?? null,
         output: picked,
         bindIps: links,
         speedLimitMbps: downloadSpeedLimit > 0 ? downloadSpeedLimit : null,
@@ -681,6 +739,7 @@ export default function App() {
         fileId: item.id,
         fileName: item.name,
         mimeType: item.mime_type,
+        resourceKey: item.resource_key ?? null,
         output: picked,
         connections,
         bindIps: links,
@@ -1387,6 +1446,69 @@ export default function App() {
               </span>
             </div>
 
+            <section className="sharedLinkImporter">
+              <div className="sharedLinkFields">
+                <label>
+                  Link compartilhado do Google Drive
+                  <input
+                    value={sharedDriveLink}
+                    onChange={(event) => setSharedDriveLink(event.target.value)}
+                    placeholder="https://drive.google.com/file/d/.../view"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={importSharedDriveLink}
+                  disabled={sharedLinkBusy || !driveAuth.connected || !sharedDriveLink.trim()}
+                >
+                  {sharedLinkBusy ? "Abrindo…" : "Importar link"}
+                </button>
+              </div>
+
+              {sharedLinkItem && (
+                <article className="sharedLinkResult">
+                  <div className="cloudItemIcon">{sharedLinkItem.is_folder ? "📁" : "🔗"}</div>
+                  <div className="cloudItemInfo">
+                    <strong>{sharedLinkItem.name}</strong>
+                    <small>
+                      {sharedLinkItem.is_folder
+                        ? "Pasta compartilhada"
+                        : sharedLinkItem.is_google_workspace
+                          ? "Documento Google Workspace compartilhado"
+                          : `${formatBytes(sharedLinkItem.size ?? 0)} • arquivo compartilhado`}
+                    </small>
+                  </div>
+                  <div className="rowActions">
+                    {sharedLinkItem.is_folder ? (
+                      <button type="button" onClick={() => openSharedDriveItem(sharedLinkItem)}>
+                        Abrir pasta
+                      </button>
+                    ) : sharedLinkItem.is_google_workspace ? (
+                      <button
+                        type="button"
+                        onClick={() => openWorkspaceExport(sharedLinkItem)}
+                        disabled={!sharedLinkItem.can_download}
+                      >
+                        Exportar
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={() => openSharedDriveItem(sharedLinkItem)}
+                        disabled={!sharedLinkItem.can_download || links.length === 0}
+                      >
+                        Baixar
+                      </button>
+                    )}
+                    <button type="button" onClick={() => setSharedLinkItem(null)}>
+                      Limpar
+                    </button>
+                  </div>
+                </article>
+              )}
+            </section>
+
             {!driveAuth.connected ? (
               <section className="driveAuthCard">
                 <div>
@@ -1427,10 +1549,14 @@ export default function App() {
                       </button>
                     ))}
                   </div>
-                  <button type="button" onClick={() => loadCloudItems(
-                    cloudBreadcrumbs[cloudBreadcrumbs.length - 1]?.id ?? null,
-                    cloudDriveId,
-                  )}>
+                  <button type="button" onClick={() => {
+                    const current = cloudBreadcrumbs[cloudBreadcrumbs.length - 1];
+                    loadCloudItems(
+                      current?.id ?? null,
+                      cloudDriveId,
+                      current?.resource_key ?? null,
+                    );
+                  }}>
                     Atualizar
                   </button>
                 </div>
@@ -2100,7 +2226,7 @@ function viewSubtitle(view: View) {
     return "Uploads resumíveis do Google Drive com sessão persistente, Multi-WAN e retomada após reiniciar o Windows.";
   }
   if (view === "cloud") {
-    return "Navegue no Drive, baixe blobs com Multi-WAN e exporte Docs, Sheets e Slides.";
+    return "Navegue no Drive, importe links compartilhados, baixe blobs com Multi-WAN e exporte Workspace.";
   }
   if (view === "queue") {
     return "Downloads e uploads em uma fila única, com até duas transferências simultâneas.";

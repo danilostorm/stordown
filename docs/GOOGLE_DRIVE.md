@@ -168,3 +168,25 @@ On restart, StorDown marks an in-flight upload as `interrupted`. After the Googl
 If the saved resumable session has expired or is no longer valid, StorDown creates a fresh resumable session for that file instead of failing the entire batch. Files already marked complete are skipped.
 
 Completed session credentials are removed from Windows Credential Manager. Removing transfer history also cleans up any remaining upload-session credentials.
+
+
+## Shared links and resource keys
+
+The Cloud workspace accepts common Google Drive and Google Workspace share URLs, including:
+
+```text
+https://drive.google.com/file/d/<id>/view
+https://drive.google.com/drive/folders/<id>
+https://drive.google.com/open?id=<id>
+https://docs.google.com/document/d/<id>/edit
+https://docs.google.com/spreadsheets/d/<id>/edit
+https://docs.google.com/presentation/d/<id>/edit
+```
+
+StorDown extracts the file/folder ID and an optional `resourcekey` query parameter, resolves the item through Drive API metadata, then exposes the same actions as the normal Cloud browser.
+
+If Google returns or the shared link contains a resource key, StorDown carries it through requests using `X-Goog-Drive-Resource-Keys`. This is important for link-shared items affected by Drive's security update.
+
+Shared blob files can enter the normal Smart Multi-WAN Range download path. Shared Workspace documents use the existing export workflow. Shared folders can be opened in the Cloud browser; the parent folder resource key is forwarded while listing its children.
+
+A Google account still needs to be connected in StorDown because the application uses the authenticated Drive API rather than scraping public HTML share pages.

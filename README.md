@@ -14,6 +14,7 @@ The repository currently contains:
 - multiple enabled links with weights;
 - Google Drive resumable upload engine;
 - native Google Drive browser with My Drive + Shared Drives browsing;
+- Google Drive/Workspace shared-link import with resource-key support;
 - Range-aware Google Drive blob downloads through the Smart Multi-WAN engine;
 - Google Workspace export from the Cloud browser (Docs, Sheets, Slides, Drawings and Apps Script);
 - multiple-file Drive upload distribution across NICs/WANs;
@@ -395,3 +396,10 @@ Drive upload batches now persist restart-safe checkpoints. StorDown stores per-f
 After a crash, app restart or Windows reboot, an upload that was active becomes **Interrompido**. Once the Google Drive account is connected/restored, **Retomar upload** reopens the saved session, verifies the server-side offset and continues only the unfinished files/bytes.
 
 If Google has expired the saved resumable session, StorDown transparently creates a new session for that file. Completed files in the same batch remain skipped.
+
+
+## Google Drive shared links
+
+Paste a Drive/Docs/Sheets/Slides share URL into the Cloud workspace and StorDown resolves the item directly through the Drive API.
+
+Blob files can be sent to the Smart Multi-WAN Range downloader, Workspace-native documents can be exported, and shared folders can be opened in the Cloud browser. Link `resourcekey` values are preserved and sent through the Google Drive resource-key header when required.
