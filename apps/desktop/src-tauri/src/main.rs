@@ -203,13 +203,23 @@ fn resolve_google_client_id(input: Option<String>) -> Result<String, String> {
         return Ok(value.trim().to_string());
     }
 
-    env::var("STORDOWN_GOOGLE_CLIENT_ID")
+    if let Some(value) = env::var("STORDOWN_GOOGLE_CLIENT_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            "Google OAuth Client ID não configurado. Defina STORDOWN_GOOGLE_CLIENT_ID ou informe o Client ID na tela de desenvolvimento."
-                .to_string()
-        })
+    {
+        return Ok(value);
+    }
+
+    if let Some(value) = option_env!("STORDOWN_GOOGLE_CLIENT_ID")
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(value.trim().to_string());
+    }
+
+    Err(
+        "Google OAuth Client ID não configurado nesta build. Informe o Client ID na tela do Google Drive."
+            .to_string(),
+    )
 }
 
 fn credential_entry(client_id: &str) -> Result<keyring::Entry, String> {
