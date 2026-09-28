@@ -1291,7 +1291,7 @@ export default function App() {
       <section className="content">
         <header>
           <div>
-            <p className="eyebrow">STORDOWN V0.2 DEV</p>
+            <p className="eyebrow">STORDOWN 0.1 ALPHA</p>
             <h1>{viewTitle(view)}</h1>
             <p className="subtitle">{viewSubtitle(view)}</p>
           </div>
@@ -1310,22 +1310,50 @@ export default function App() {
 
             <label>
               URL
-              <input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://servidor/arquivo.iso"
-                required
-              />
+              <div className="fieldWithButton">
+                <input
+                  value={url}
+                  onChange={(e) => {
+                    setUrl(e.target.value);
+                    setDownloadProbe(null);
+                    setOutputManuallyEdited(false);
+                  }}
+                  onBlur={inspectDownloadUrl}
+                  placeholder="https://servidor/arquivo.iso"
+                  required
+                />
+                <button type="button" onClick={inspectDownloadUrl} disabled={inspectingUrl || !url.trim()}>
+                  {inspectingUrl ? "Analisando…" : "Analisar"}
+                </button>
+              </div>
+              {downloadProbe && (
+                <small className="fieldHint downloadProbe">
+                  {downloadProbe.suggested_name ?? "Nome não informado"} •{" "}
+                  {downloadProbe.size ? formatBytes(downloadProbe.size) : "tamanho desconhecido"} •{" "}
+                  {downloadProbe.accepts_ranges ? "HTTP Range / Multi-WAN" : "download direto"}
+                </small>
+              )}
             </label>
 
             <label>
-              Salvar em
+              Arquivo de destino
               <div className="fieldWithButton">
-                <input value={output} onChange={(e) => setOutput(e.target.value)} required />
+                <input
+                  value={output}
+                  onChange={(e) => {
+                    setOutput(e.target.value);
+                    setOutputManuallyEdited(true);
+                  }}
+                  placeholder="Pasta Downloads deste Windows"
+                  required
+                />
                 <button type="button" onClick={chooseDownloadDestination}>
-                  Procurar…
+                  Escolher pasta…
                 </button>
               </div>
+              <small className="fieldHint">
+                O StorDown usa a pasta Downloads deste computador e tenta obter o nome real pelo servidor.
+              </small>
             </label>
 
             <label>
