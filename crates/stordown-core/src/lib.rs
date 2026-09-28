@@ -8,11 +8,13 @@ pub mod throttle;
 
 pub use adaptive::{AdaptiveLinkPool, LinkHealthSnapshot, LinkLease};
 pub use cloud::{
-    authorize_google_drive_desktop, refresh_google_access_token, upload_google_drive_batch,
+    authorize_google_drive_desktop, list_google_drive_folders, refresh_google_access_token,
+    upload_google_drive_batch,
     upload_google_drive_batch_with_control, upload_google_drive_batch_with_progress,
     upload_google_drive_file, upload_google_drive_file_with_control,
     upload_google_drive_file_with_progress, GoogleDriveBatchUploadRequest,
-    GoogleDriveUploadRequest, GoogleDriveUploadResult, GoogleOAuthTokens, DRIVE_FILE_SCOPE,
+    GoogleDriveFolder, GoogleDriveUploadRequest, GoogleDriveUploadResult, GoogleOAuthTokens,
+    DRIVE_FILE_SCOPE, DRIVE_METADATA_SCOPE, DRIVE_SCOPES,
 };
 pub use control::TransferControl;
 pub use downloader::{download, download_with_control, download_with_progress, probe};
