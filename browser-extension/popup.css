@@ -162,3 +162,81 @@ button {
   opacity: .5;
   cursor: default;
 }
+
+
+.sitePolicyCard,
+.batchCard {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #283148;
+  border-radius: 12px;
+  background: #111725;
+}
+
+.sitePolicyCard strong,
+.sitePolicyCard span,
+.batchCard strong,
+.batchCard span {
+  display: block;
+}
+
+#policySiteName {
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+#sitePolicy {
+  width: 100%;
+  margin-top: 9px;
+  border: 1px solid #38445f;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: #0d1422;
+  color: #eef1ff;
+  font-size: 10px;
+}
+
+.batchCard {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.batchCard > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.batchCard strong {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+#batchStatus {
+  margin-top: 4px;
+  color: #8490a7;
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+#batchStatus[data-state="ok"] {
+  color: #7ee0ab;
+}
+
+#batchStatus[data-state="error"] {
+  color: #ff8998;
+}
+
+#downloadAllButton {
+  flex: 0 0 auto;
+  max-width: 105px;
+}
+
+button:disabled,
+select:disabled {
+  opacity: .5;
+  cursor: default;
+}
