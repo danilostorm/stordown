@@ -32,6 +32,18 @@ type GoogleDriveFolder = {
   drive_id?: string | null;
 };
 
+type GoogleDriveItem = {
+  id: string;
+  name: string;
+  mime_type: string;
+  size?: number | null;
+  drive_id?: string | null;
+  can_download: boolean;
+  md5_checksum?: string | null;
+  is_folder: boolean;
+  is_google_workspace: boolean;
+};
+
 type GoogleSharedDrive = {
   id: string;
   name: string;
@@ -98,7 +110,7 @@ type SpeedWindow = {
   bytes: number;
 };
 
-type View = "download" | "upload" | "queue" | "scheduled" | "finished" | "settings";
+type View = "download" | "upload" | "cloud" | "queue" | "scheduled" | "finished" | "settings";
 
 const activeStatuses = new Set(["scheduled", "queued", "running", "paused", "interrupted"]);
 const finishedStatuses = new Set(["completed", "failed", "cancelled"]);
@@ -129,6 +141,12 @@ export default function App() {
   const [sharedDrives, setSharedDrives] = useState<GoogleSharedDrive[]>([]);
   const [activeDriveId, setActiveDriveId] = useState<string | null>(null);
   const [driveBreadcrumbs, setDriveBreadcrumbs] = useState<DriveBreadcrumb[]>([
+    { id: null, name: "Meu Drive" },
+  ]);
+  const [cloudItems, setCloudItems] = useState<GoogleDriveItem[]>([]);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudDriveId, setCloudDriveId] = useState<string | null>(null);
+  const [cloudBreadcrumbs, setCloudBreadcrumbs] = useState<DriveBreadcrumb[]>([
     { id: null, name: "Meu Drive" },
   ]);
   const [driveClientId, setDriveClientId] = useState("");
@@ -479,6 +497,129 @@ export default function App() {
     setStatus(`Destino do Google Drive: ${driveBreadcrumbs.map((item) => item.name).join(" / ")}`);
   }
 
+  async function loadCloudItems(
+    parentId: string | null,
+    driveId: string | null,
+  ) {
+    if (!driveAuth.connected) {
+      setCloudItems([]);
+      return;
+    }
+
+    setCloudBusy(true);
+
+    try {
+      const items = await invoke<GoogleDriveItem[]>("browse_google_drive_items", {
+        parentId,
+        driveId,
+      });
+      setCloudItems(items);
+    } catch (error) {
+      const message = String(error);
+      setCloudItems([]);
+      setStatus(
+        message.includes("403") || message.toLowerCase().includes("scope")
+          ? "Reconecte o Google Drive para liberar leitura e download dos arquivos."
+          : `Erro ao listar arquivos do Google Drive: ${message}`,
+      );
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
+  async function openCloudWorkspace() {
+    setView("cloud");
+
+    if (!driveAuth.connected) {
+      setStatus("Conecte sua conta Google Drive para navegar e baixar arquivos");
+      return;
+    }
+
+    setCloudBusy(true);
+
+    try {
+      const drives = await invoke<GoogleSharedDrive[]>("list_google_drive_roots");
+      setSharedDrives(drives);
+      setCloudDriveId(null);
+      setCloudBreadcrumbs([{ id: null, name: "Meu Drive" }]);
+      await loadCloudItems(null, null);
+      setStatus("Google Drive carregado");
+    } catch (error) {
+      setStatus(`Erro ao abrir Google Drive: ${String(error)}`);
+      setCloudBusy(false);
+    }
+  }
+
+  async function switchCloudDrive(drive: GoogleSharedDrive | null) {
+    const driveId = drive?.id ?? null;
+    setCloudDriveId(driveId);
+    setCloudBreadcrumbs([{ id: driveId, name: drive?.name ?? "Meu Drive" }]);
+    await loadCloudItems(driveId, driveId);
+  }
+
+  async function enterCloudFolder(item: GoogleDriveItem) {
+    if (!item.is_folder) return;
+
+    setCloudBreadcrumbs((current) => [
+      ...current,
+      { id: item.id, name: item.name },
+    ]);
+    await loadCloudItems(item.id, cloudDriveId);
+  }
+
+  async function cloudBack() {
+    if (cloudBreadcrumbs.length <= 1) return;
+
+    const next = cloudBreadcrumbs.slice(0, -1);
+    const parent = next[next.length - 1];
+    setCloudBreadcrumbs(next);
+    await loadCloudItems(parent.id, cloudDriveId);
+  }
+
+  async function downloadCloudItem(item: GoogleDriveItem) {
+    if (item.is_folder) {
+      await enterCloudFolder(item);
+      return;
+    }
+
+    if (item.is_google_workspace) {
+      setStatus("Arquivos Google Docs/Sheets/Slides precisam de exportação; isso entra na próxima etapa.");
+      return;
+    }
+
+    if (!item.can_download) {
+      setStatus("Sua permissão do Google Drive não permite baixar este arquivo.");
+      return;
+    }
+
+    try {
+      const picked = await invoke<string | null>("pick_download_destination", {
+        suggestedName: item.name,
+      });
+      if (!picked) return;
+
+      const transferId = crypto.randomUUID();
+      const record = await invoke<TransferRecord>("enqueue_drive_download", {
+        fileId: item.id,
+        fileName: item.name,
+        mimeType: item.mime_type,
+        output: picked,
+        connections,
+        bindIps: links,
+        speedLimitMbps: downloadSpeedLimit > 0 ? downloadSpeedLimit : null,
+        transferId,
+      });
+
+      setActiveTransferId(record.id);
+      setLinkSpeeds({});
+      speedWindows.current = {};
+      await reloadTransfers();
+      setStatus(`${item.name} adicionado à fila Multi-WAN`);
+    } catch (error) {
+      setStatus(`Erro ao baixar do Google Drive: ${String(error)}`);
+    }
+  }
+
   async function chooseDownloadDestination() {
     try {
       const picked = await invoke<string | null>("pick_download_destination", {
@@ -748,7 +889,12 @@ export default function App() {
             <span>Finalizados</span>
             <b>{finishedRecords.length}</b>
           </button>
-          <button className="navItem" disabled>Cloud</button>
+          <button
+            className={`navItem ${view === "cloud" ? "active" : ""}`}
+            onClick={openCloudWorkspace}
+          >
+            Cloud
+          </button>
           <button
             className={`navItem ${view === "settings" ? "active" : ""}`}
             onClick={() => setView("settings")}
@@ -1129,6 +1275,147 @@ export default function App() {
               {busy ? "Adicionando…" : `Adicionar ${files.length} arquivo(s) à fila`}
             </button>
           </form>
+        )}
+
+        {view === "cloud" && (
+          <section className="cloudWorkspace">
+            <div className="notice">
+              <strong>Google Drive → download Multi-WAN</strong>
+              <span>
+                Arquivos binários usam o endpoint alt=media com HTTP Range, então o mesmo motor
+                adaptativo do StorDown pode dividir o arquivo entre WAN1/WAN2, retomar partes e
+                fazer failover de segmentos.
+              </span>
+            </div>
+
+            {!driveAuth.connected ? (
+              <section className="driveAuthCard">
+                <div>
+                  <span className="driveAuthLabel">CONTA GOOGLE DRIVE</span>
+                  <strong>Conta não conectada</strong>
+                  <small>
+                    O download de conteúdo exige nova autorização de leitura do Drive.
+                  </small>
+                </div>
+                <div className="driveAuthActions">
+                  <button type="button" onClick={connectDrive} disabled={authBusy}>
+                    {authBusy ? "Conectando…" : "Conectar Google Drive"}
+                  </button>
+                  <button type="button" onClick={restoreDrive} disabled={authBusy}>
+                    Restaurar sessão
+                  </button>
+                </div>
+              </section>
+            ) : (
+              <>
+                <div className="cloudToolbar">
+                  <div className="driveRootTabs">
+                    <button
+                      type="button"
+                      className={cloudDriveId === null ? "active" : ""}
+                      onClick={() => switchCloudDrive(null)}
+                    >
+                      Meu Drive
+                    </button>
+                    {sharedDrives.map((drive) => (
+                      <button
+                        type="button"
+                        key={drive.id}
+                        className={cloudDriveId === drive.id ? "active" : ""}
+                        onClick={() => switchCloudDrive(drive)}
+                      >
+                        {drive.name}
+                      </button>
+                    ))}
+                  </div>
+                  <button type="button" onClick={() => loadCloudItems(
+                    cloudBreadcrumbs[cloudBreadcrumbs.length - 1]?.id ?? null,
+                    cloudDriveId,
+                  )}>
+                    Atualizar
+                  </button>
+                </div>
+
+                <div className="cloudPathBar">
+                  <button
+                    type="button"
+                    onClick={cloudBack}
+                    disabled={cloudBreadcrumbs.length <= 1 || cloudBusy}
+                  >
+                    ← Voltar
+                  </button>
+                  <strong>{cloudBreadcrumbs.map((item) => item.name).join(" / ")}</strong>
+                </div>
+
+                <div className="cloudDownloadOptions">
+                  <label>
+                    Conexões por arquivo
+                    <input
+                      type="number"
+                      min={1}
+                      max={64}
+                      value={connections}
+                      onChange={(event) => setConnections(Number(event.target.value))}
+                    />
+                  </label>
+                  <label>
+                    Limite de download
+                    <input
+                      type="number"
+                      min={0}
+                      value={downloadSpeedLimit}
+                      onChange={(event) => setDownloadSpeedLimit(Number(event.target.value))}
+                    />
+                    <small className="fieldHint">Mbps totais. 0 = ilimitado.</small>
+                  </label>
+                </div>
+
+                <div className="cloudItemList">
+                  {cloudBusy ? (
+                    <div className="driveBrowserEmpty">Carregando Google Drive…</div>
+                  ) : cloudItems.length === 0 ? (
+                    <div className="driveBrowserEmpty">Esta pasta está vazia.</div>
+                  ) : (
+                    cloudItems.map((item) => (
+                      <article className="cloudItemRow" key={item.id}>
+                        <div className="cloudItemIcon">{item.is_folder ? "📁" : "📄"}</div>
+                        <div className="cloudItemInfo">
+                          <strong title={item.name}>{item.name}</strong>
+                          <small>
+                            {item.is_folder
+                              ? "Pasta"
+                              : item.is_google_workspace
+                                ? "Documento Google Workspace"
+                                : `${formatBytes(item.size ?? 0)} • ${item.mime_type}`}
+                          </small>
+                        </div>
+                        <div className="rowActions">
+                          {item.is_folder ? (
+                            <button type="button" onClick={() => enterCloudFolder(item)}>
+                              Abrir
+                            </button>
+                          ) : item.is_google_workspace ? (
+                            <button type="button" disabled>
+                              Exportar em breve
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="primary"
+                              disabled={!item.can_download || links.length === 0}
+                              onClick={() => downloadCloudItem(item)}
+                            >
+                              Baixar
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+          </section>
         )}
 
         {view === "queue" && (
@@ -1640,6 +1927,7 @@ function TransferTelemetry({
 function viewTitle(view: View) {
   if (view === "download") return "Novo download";
   if (view === "upload") return "Upload para Google Drive";
+  if (view === "cloud") return "Google Drive";
   if (view === "queue") return "Fila de transferências";
   if (view === "scheduled") return "Agendador";
   if (view === "settings") return "Configurações";
@@ -1652,6 +1940,9 @@ function viewSubtitle(view: View) {
   }
   if (view === "upload") {
     return "Adicione lotes de upload do Google Drive à mesma fila do StorDown.";
+  }
+  if (view === "cloud") {
+    return "Navegue no Drive e baixe arquivos binários usando HTTP Range, Smart Multi-WAN e resume.";
   }
   if (view === "queue") {
     return "Downloads e uploads em uma fila única, com até duas transferências simultâneas.";
