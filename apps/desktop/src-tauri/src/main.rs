@@ -13,9 +13,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use stordown_core::{
-    authorize_google_drive_desktop, download_with_control, probe_links,
+    authorize_google_drive_desktop, download_with_control, list_google_drive_folders, probe_links,
     refresh_google_access_token, upload_google_drive_batch_with_control, DownloadRequest,
-    GoogleDriveBatchUploadRequest, LinkConfig, LinkProbeStatus, ProgressCallback, TransferControl,
+    GoogleDriveBatchUploadRequest, GoogleDriveFolder, LinkConfig, LinkProbeStatus,
+    ProgressCallback, TransferControl,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
@@ -301,6 +302,20 @@ async fn google_drive_auth_status(
 ) -> Result<GoogleAuthStatus, String> {
     let guard = state.session.lock().await;
     Ok(auth_status(guard.as_ref()))
+}
+
+#[tauri::command]
+async fn list_drive_folders(
+    parent_id: Option<String>,
+    state: State<'_, GoogleAuthState>,
+) -> Result<Vec<GoogleDriveFolder>, String> {
+    let access_token = current_google_access_token(state.inner()).await?;
+    list_google_drive_folders(
+        &access_token,
+        parent_id.as_deref().filter(|value| !value.trim().is_empty()),
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1471,6 +1486,7 @@ fn main() {
             connect_google_drive,
             restore_google_drive,
             google_drive_auth_status,
+            list_drive_folders,
             disconnect_google_drive
         ])
         .run(tauri::generate_context!())
