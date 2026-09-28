@@ -13,9 +13,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use stordown_core::{
-    authorize_google_drive_desktop, download_with_control, probe_links,
-    refresh_google_access_token, upload_google_drive_batch_with_control, DownloadRequest,
-    GoogleDriveBatchUploadRequest, LinkConfig, LinkProbeStatus, ProgressCallback, TransferControl,
+    authorize_google_drive_desktop, download_with_control, list_google_drive_folders,
+    list_google_shared_drives, probe_links, refresh_google_access_token,
+    upload_google_drive_batch_with_control, DownloadRequest, GoogleDriveBatchUploadRequest,
+    GoogleDriveFolder, GoogleSharedDrive, LinkConfig, LinkProbeStatus, ProgressCallback,
+    TransferControl,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
@@ -326,6 +328,33 @@ async fn disconnect_google_drive(
     }
 
     Ok(auth_status(None))
+}
+
+#[tauri::command]
+async fn browse_google_drive_folders(
+    parent_id: Option<String>,
+    drive_id: Option<String>,
+    state: State<'_, GoogleAuthState>,
+) -> Result<Vec<GoogleDriveFolder>, String> {
+    let access_token = current_google_access_token(state.inner()).await?;
+
+    list_google_drive_folders(
+        &access_token,
+        parent_id.as_deref(),
+        drive_id.as_deref(),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_google_drive_roots(
+    state: State<'_, GoogleAuthState>,
+) -> Result<Vec<GoogleSharedDrive>, String> {
+    let access_token = current_google_access_token(state.inner()).await?;
+    list_google_shared_drives(&access_token)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn current_google_access_token(state: &GoogleAuthState) -> Result<String, String> {
@@ -1471,6 +1500,8 @@ fn main() {
             connect_google_drive,
             restore_google_drive,
             google_drive_auth_status,
+            browse_google_drive_folders,
+            list_google_drive_roots,
             disconnect_google_drive
         ])
         .run(tauri::generate_context!())

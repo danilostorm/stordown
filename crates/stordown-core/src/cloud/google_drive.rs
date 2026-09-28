@@ -28,6 +28,9 @@ use tokio::{
 
 const DRIVE_UPLOAD_URL: &str =
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id,name,size,webViewLink";
+const DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files";
+const DRIVE_DRIVES_URL: &str = "https://www.googleapis.com/drive/v3/drives";
+const DRIVE_FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const DRIVE_CHUNK_GRANULARITY: u64 = 256 * 1024;
 const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_CHUNK_RETRIES: usize = 5;
@@ -68,6 +71,43 @@ pub struct GoogleDriveBatchUploadRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveFolder {
+    pub id: String,
+    pub name: String,
+    pub drive_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleSharedDrive {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDriveFolderListResponse {
+    #[serde(default)]
+    files: Vec<GoogleDriveFolderResponse>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDriveFolderResponse {
+    id: String,
+    name: String,
+    #[serde(rename = "driveId")]
+    drive_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleSharedDriveListResponse {
+    #[serde(default)]
+    drives: Vec<GoogleSharedDrive>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleDriveUploadResult {
     pub id: String,
     pub name: String,
@@ -86,6 +126,124 @@ struct DriveFileResponse {
     size: Option<String>,
     #[serde(rename = "webViewLink")]
     web_view_link: Option<String>,
+}
+
+pub async fn list_google_drive_folders(
+    access_token: &str,
+    parent_id: Option<&str>,
+    drive_id: Option<&str>,
+) -> Result<Vec<GoogleDriveFolder>> {
+    let client = Client::new();
+    let parent = parent_id
+        .filter(|value| !value.trim().is_empty())
+        .or(drive_id.filter(|value| !value.trim().is_empty()))
+        .unwrap_or("root");
+
+    let query = format!(
+        "'{}' in parents and trashed = false and mimeType = '{}'",
+        escape_drive_query_literal(parent),
+        DRIVE_FOLDER_MIME
+    );
+
+    let mut page_token: Option<String> = None;
+    let mut folders = Vec::new();
+
+    loop {
+        let mut request = client
+            .get(DRIVE_FILES_URL)
+            .bearer_auth(access_token)
+            .query(&[
+                ("q", query.as_str()),
+                ("spaces", "drive"),
+                ("supportsAllDrives", "true"),
+                ("includeItemsFromAllDrives", "true"),
+                ("pageSize", "1000"),
+                ("fields", "nextPageToken,files(id,name,driveId)"),
+                ("orderBy", "name_natural"),
+            ]);
+
+        if let Some(drive_id) = drive_id.filter(|value| !value.trim().is_empty()) {
+            request = request.query(&[("corpora", "drive"), ("driveId", drive_id)]);
+        } else {
+            request = request.query(&[("corpora", "user")]);
+        }
+
+        if let Some(token) = page_token.as_deref() {
+            request = request.query(&[("pageToken", token)]);
+        }
+
+        let response = request
+            .send()
+            .await
+            .context("failed to list Google Drive folders")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("Google Drive folder list failed ({status}): {body}");
+        }
+
+        let page: GoogleDriveFolderListResponse = response.json().await?;
+        folders.extend(page.files.into_iter().map(|folder| GoogleDriveFolder {
+            id: folder.id,
+            name: folder.name,
+            drive_id: folder.drive_id,
+        }));
+
+        page_token = page.next_page_token;
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    Ok(folders)
+}
+
+pub async fn list_google_shared_drives(
+    access_token: &str,
+) -> Result<Vec<GoogleSharedDrive>> {
+    let client = Client::new();
+    let mut page_token: Option<String> = None;
+    let mut drives = Vec::new();
+
+    loop {
+        let mut request = client
+            .get(DRIVE_DRIVES_URL)
+            .bearer_auth(access_token)
+            .query(&[
+                ("pageSize", "100"),
+                ("fields", "nextPageToken,drives(id,name)"),
+            ]);
+
+        if let Some(token) = page_token.as_deref() {
+            request = request.query(&[("pageToken", token)]);
+        }
+
+        let response = request
+            .send()
+            .await
+            .context("failed to list shared Google Drives")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("Google shared-drive list failed ({status}): {body}");
+        }
+
+        let page: GoogleSharedDriveListResponse = response.json().await?;
+        drives.extend(page.drives);
+
+        page_token = page.next_page_token;
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    Ok(drives)
+}
+
+fn escape_drive_query_literal(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 pub async fn upload_google_drive_file(
@@ -888,8 +1046,14 @@ fn backoff(attempt: usize) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_offset_from_range, validate_chunk_size};
+    use super::{escape_drive_query_literal, next_offset_from_range, validate_chunk_size};
     use reqwest::header::HeaderValue;
+
+    #[test]
+    fn drive_query_literals_are_escaped() {
+        assert_eq!(escape_drive_query_literal("abc'def"), "abc\\'def");
+        assert_eq!(escape_drive_query_literal("a\\b"), "a\\\\b");
+    }
 
     #[test]
     fn drive_chunk_size_must_use_256_kib_granularity() {

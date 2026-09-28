@@ -47,8 +47,8 @@
 
 - [x] OAuth desktop login with PKCE + loopback callback
 - [x] Secure refresh-token storage using the Windows credential store
-- [ ] Drive browser / destination picker
-- [ ] Shared Drive browsing
+- [x] Drive browser / destination picker
+- [x] Shared Drive browsing
 - [ ] Shared links
 - [ ] Range-aware Drive downloads
 - [ ] Persist and resume Drive upload sessions after restart

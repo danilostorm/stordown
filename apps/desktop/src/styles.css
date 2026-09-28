@@ -834,3 +834,173 @@ input:focus, textarea:focus, select:focus {
   color: #7e8ca7;
   font-size: 9px;
 }
+
+
+.driveDestinationField {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 11px;
+  border: 1px solid #293247;
+  border-radius: 11px;
+  background: #0c111c;
+}
+
+.driveDestinationField > div {
+  min-width: 0;
+}
+
+.driveDestinationField strong,
+.driveDestinationField small {
+  display: block;
+}
+
+.driveDestinationField strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #edf1fb;
+  font-size: 12px;
+}
+
+.driveDestinationField small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 3px;
+  color: #74819a;
+  font-size: 9px;
+}
+
+.driveDestinationField button,
+.driveBrowser button {
+  border: 1px solid #34405a;
+  border-radius: 9px;
+  padding: 9px 11px;
+  background: #172033;
+  color: #eef1ff;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.driveDestinationField button:disabled,
+.driveBrowser button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.driveBrowser {
+  display: grid;
+  gap: 12px;
+  padding: 15px;
+  border: 1px solid #303b54;
+  border-radius: 14px;
+  background: #0a101a;
+}
+
+.driveBrowserHeader,
+.driveBrowserToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.driveBrowserHeader > div {
+  min-width: 0;
+}
+
+.driveBrowserHeader span,
+.driveBrowserHeader strong {
+  display: block;
+}
+
+.driveBrowserHeader span {
+  color: #7f8cff;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: .12em;
+}
+
+.driveBrowserHeader strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.driveRootTabs {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.driveRootTabs button {
+  flex: 0 0 auto;
+}
+
+.driveRootTabs button.active {
+  border-color: #6878ff;
+  background: #20294a;
+}
+
+.driveBrowserToolbar .primary {
+  border: 0;
+  background: linear-gradient(135deg, #6678ff, #7357ff);
+}
+
+.driveFolderList {
+  display: grid;
+  gap: 7px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.driveFolderRow {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  background: #111824 !important;
+}
+
+.driveFolderRow:hover {
+  border-color: #5666cb;
+}
+
+.driveFolderRow strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.driveFolderRow small {
+  color: #7d89a0;
+  font-size: 9px;
+}
+
+.driveBrowserEmpty {
+  padding: 24px;
+  border: 1px dashed #2a3449;
+  border-radius: 10px;
+  color: #79869d;
+  text-align: center;
+  font-size: 11px;
+}
+
+@media (max-width: 1080px) {
+  .driveDestinationField {
+    grid-template-columns: 1fr;
+  }
+
+  .driveDestinationField button {
+    justify-self: start;
+  }
+}
