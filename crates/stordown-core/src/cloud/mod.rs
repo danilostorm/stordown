@@ -4,6 +4,7 @@ pub mod google_oauth;
 pub use google_drive::{
     google_drive_export_formats, google_drive_export_url, google_drive_media_url,
     list_google_drive_folders, list_google_drive_items, list_google_shared_drives,
+    parse_google_drive_shared_link, resolve_google_drive_shared_link,
     upload_google_drive_batch, upload_google_drive_batch_resumable_with_control,
     upload_google_drive_batch_with_control, upload_google_drive_batch_with_progress,
     upload_google_drive_file, upload_google_drive_file_with_control,
