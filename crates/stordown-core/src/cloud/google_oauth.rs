@@ -15,6 +15,12 @@ use url::Url;
 const AUTHORIZE_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 pub const DRIVE_FILE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
+pub const DRIVE_METADATA_READONLY_SCOPE: &str =
+    "https://www.googleapis.com/auth/drive.metadata.readonly";
+
+fn drive_scopes() -> String {
+    format!("{DRIVE_FILE_SCOPE} {DRIVE_METADATA_READONLY_SCOPE}")
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GoogleOAuthTokens {
@@ -63,7 +69,7 @@ pub async fn authorize_google_drive_desktop(client_id: &str) -> Result<GoogleOAu
         .append_pair("client_id", client_id.trim())
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("response_type", "code")
-        .append_pair("scope", DRIVE_FILE_SCOPE)
+        .append_pair("scope", &drive_scopes())
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", &state)
@@ -232,7 +238,14 @@ fn open_system_browser(_url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::random_urlsafe;
+    use super::{drive_scopes, random_urlsafe, DRIVE_FILE_SCOPE, DRIVE_METADATA_READONLY_SCOPE};
+
+    #[test]
+    fn google_drive_scope_set_supports_upload_and_metadata_browsing() {
+        let scopes = drive_scopes();
+        assert!(scopes.contains(DRIVE_FILE_SCOPE));
+        assert!(scopes.contains(DRIVE_METADATA_READONLY_SCOPE));
+    }
 
     #[test]
     fn verifier_is_pkce_length_compatible() {
