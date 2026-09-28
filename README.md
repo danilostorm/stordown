@@ -37,6 +37,7 @@ The repository currently contains:
 - persistent HTTP download scheduler with restart recovery;
 - adaptive Multi-WAN chunk scheduling with automatic link failover;
 - adaptive Google Drive batch assignment with resumable chunk failover;
+- persistent Google Drive resumable-upload checkpoints across app/Windows restarts;
 - per-transfer aggregate speed limits for HTTP downloads and Drive upload batches;
 - optional SHA256 verification before HTTP downloads are marked complete;
 - GitHub Actions CI.
@@ -385,3 +386,12 @@ Native Google Workspace documents appear in the Cloud browser with **Exportar** 
 StorDown presents compatible target formats, for example DOCX/PDF for Docs, XLSX/PDF/CSV for Sheets, and PPTX/PDF for Slides. The selected export is queued with pause/cancel telemetry and the normal Windows destination picker.
 
 Workspace export responses do not support HTTP Range, so these transfers use one direct connection rather than pretending they can aggregate WAN1 + WAN2. The standard Drive `files.export` endpoint is also limited to 10 MB of exported content; Google Vids requires a separate long-running download API.
+
+
+## Google Drive upload restart recovery
+
+Drive upload batches now persist restart-safe checkpoints. StorDown stores per-file offsets and metadata in SQLite, while the sensitive Google resumable-session URI is kept in the Windows credential store rather than the database.
+
+After a crash, app restart or Windows reboot, an upload that was active becomes **Interrompido**. Once the Google Drive account is connected/restored, **Retomar upload** reopens the saved session, verifies the server-side offset and continues only the unfinished files/bytes.
+
+If Google has expired the saved resumable session, StorDown transparently creates a new session for that file. Completed files in the same batch remain skipped.
