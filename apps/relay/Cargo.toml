@@ -1,0 +1,14 @@
+[package]
+name = "stordown-relay"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+stordown-core = { path = "../../crates/stordown-core" }
+tokio.workspace = true
+uuid = { version = "1", features = ["v4"] }
