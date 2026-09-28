@@ -1199,3 +1199,70 @@ input:focus, textarea:focus, select:focus {
   color: #8e99af;
   font-size: 10px;
 }
+
+
+.sharedLinkImporter {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #28344a;
+  border-radius: 13px;
+  background: #0c121d;
+}
+
+.sharedLinkFields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.sharedLinkFields label {
+  min-width: 0;
+}
+
+.sharedLinkFields > button {
+  border: 1px solid #4a5d92;
+  border-radius: 10px;
+  padding: 11px 14px;
+  background: #1b2742;
+  color: #eef2ff;
+  font-size: 10px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.sharedLinkFields > button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.sharedLinkResult {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid #33415d;
+  border-radius: 11px;
+  background: #111927;
+}
+
+@media (max-width: 1080px) {
+  .sharedLinkFields {
+    grid-template-columns: 1fr;
+  }
+
+  .sharedLinkFields > button {
+    justify-self: start;
+  }
+
+  .sharedLinkResult {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .sharedLinkResult .rowActions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+}
