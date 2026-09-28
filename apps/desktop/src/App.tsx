@@ -796,8 +796,29 @@ export default function App() {
 
   async function resumeTransfer(transferId: string) {
     try {
-      await invoke("resume_transfer", { transferId });
-      setStatus("Transferência retomada");
+      const record = records.find((item) => item.id === transferId);
+
+      if (
+        record?.status === "interrupted" &&
+        record.provider === "google_drive" &&
+        record.direction === "upload"
+      ) {
+        if (!driveAuth.connected) {
+          setStatus("Conecte ou restaure o Google Drive antes de retomar este upload.");
+          setView("upload");
+          return;
+        }
+
+        await invoke<TransferRecord>("resume_drive_upload", { transferId });
+        setStatus("Upload do Google Drive retomado da sessão salva");
+      } else {
+        await invoke("resume_transfer", { transferId });
+        setStatus("Transferência retomada");
+      }
+
+      setActiveTransferId(transferId);
+      setLinkSpeeds({});
+      speedWindows.current = {};
       await reloadTransfers();
     } catch (error) {
       setStatus(`Erro ao retomar: ${String(error)}`);
@@ -1915,6 +1936,13 @@ function TransferList({
               {record.status === "paused" && (
                 <button type="button" onClick={() => onResume(record.id)}>Retomar</button>
               )}
+              {record.status === "interrupted" &&
+                record.provider === "google_drive" &&
+                record.direction === "upload" && (
+                  <button type="button" onClick={() => onResume(record.id)}>
+                    Retomar upload
+                  </button>
+                )}
               {(record.status === "running" || record.status === "paused" || record.status === "queued" || record.status === "scheduled") && (
                 <button type="button" className="dangerButton" onClick={() => onCancel(record.id)}>
                   Cancelar
@@ -1989,6 +2017,11 @@ function TransferTelemetry({
           {record.status === "paused" && (
             <button type="button" onClick={onResume}>Retomar</button>
           )}
+          {record.status === "interrupted" &&
+            record.provider === "google_drive" &&
+            record.direction === "upload" && (
+              <button type="button" onClick={onResume}>Retomar upload</button>
+            )}
           {(record.status === "running" || record.status === "paused" || record.status === "queued") && (
             <button type="button" className="dangerButton" onClick={onCancel}>Cancelar</button>
           )}
@@ -2064,7 +2097,7 @@ function viewSubtitle(view: View) {
     return "Adicione downloads HTTP/HTTPS segmentados à fila Multi-WAN.";
   }
   if (view === "upload") {
-    return "Adicione lotes de upload do Google Drive à mesma fila do StorDown.";
+    return "Uploads resumíveis do Google Drive com sessão persistente, Multi-WAN e retomada após reiniciar o Windows.";
   }
   if (view === "cloud") {
     return "Navegue no Drive, baixe blobs com Multi-WAN e exporte Docs, Sheets e Slides.";

@@ -16,9 +16,11 @@ use stordown_core::{
     authorize_google_drive_desktop, download_direct_with_control, download_with_control,
     google_drive_export_formats, google_drive_export_url, google_drive_media_url,
     list_google_drive_folders, list_google_drive_items, list_google_shared_drives, probe_links,
-    refresh_google_access_token, upload_google_drive_batch_with_control, DownloadRequest,
+    refresh_google_access_token, upload_google_drive_batch_resumable_with_control,
+    upload_google_drive_batch_with_control, DownloadRequest, DriveUploadCheckpointCallback,
     GoogleDriveBatchUploadRequest, GoogleDriveExportFormat, GoogleDriveFolder, GoogleDriveItem,
-    GoogleSharedDrive, LinkConfig, LinkProbeStatus, ProgressCallback, TransferControl,
+    GoogleDriveUploadResumeState, GoogleSharedDrive, LinkConfig, LinkProbeStatus,
+    ProgressCallback, TransferControl,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
@@ -27,11 +29,13 @@ use tokio::{
     sync::{Mutex, Semaphore},
 };
 use transfer_store::{
-    DownloadRule, NewDownloadRule, NewTransferRecord, TransferRecord, TransferStore,
+    DownloadRule, DriveUploadSessionRecord, NewDownloadRule, NewDriveUploadSessionRecord,
+    NewTransferRecord, TransferRecord, TransferStore,
 };
 use uuid::Uuid;
 
 const GOOGLE_KEYRING_SERVICE: &str = "StorDown Google Drive";
+const GOOGLE_UPLOAD_KEYRING_SERVICE: &str = "StorDown Google Drive Upload Session";
 const DEFAULT_QUEUE_CONCURRENCY: usize = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +213,92 @@ fn resolve_google_client_id(input: Option<String>) -> Result<String, String> {
 fn credential_entry(client_id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(GOOGLE_KEYRING_SERVICE, client_id)
         .map_err(|error| format!("Falha ao acessar o armazenamento seguro do Windows: {error}"))
+}
+
+fn upload_session_entry(key: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(GOOGLE_UPLOAD_KEYRING_SERVICE, key)
+        .map_err(|error| format!("Falha ao acessar sessão segura de upload: {error}"))
+}
+
+fn drive_checkpoint_emitter(
+    transfer_id: String,
+    store: TransferStore,
+    credential_keys: Arc<HashMap<String, String>>,
+) -> DriveUploadCheckpointCallback {
+    Arc::new(move |checkpoint| {
+        let Some(credential_key) = credential_keys.get(&checkpoint.source).cloned() else {
+            return;
+        };
+
+        let transfer_id = transfer_id.clone();
+        let store = store.clone();
+
+        tauri::async_runtime::spawn(async move {
+            if !checkpoint.completed {
+                if let Ok(entry) = upload_session_entry(&credential_key) {
+                    let _ = entry.set_password(&checkpoint.session_uri);
+                }
+            }
+
+            let _ = store
+                .update_drive_upload_checkpoint(
+                    &transfer_id,
+                    &checkpoint.source,
+                    checkpoint.confirmed_offset,
+                    checkpoint.total_size,
+                    &checkpoint.remote_name,
+                    &checkpoint.mime_type,
+                    checkpoint.parent_id.as_deref(),
+                    checkpoint.chunk_size,
+                    checkpoint.completed,
+                )
+                .await;
+
+            if checkpoint.completed {
+                if let Ok(entry) = upload_session_entry(&credential_key) {
+                    let _ = entry.delete_credential();
+                }
+            }
+        });
+    })
+}
+
+async fn cleanup_drive_upload_credentials(
+    store: &TransferStore,
+    transfer_id: &str,
+) -> Result<(), String> {
+    for session in store.list_drive_upload_sessions(transfer_id).await? {
+        if let Ok(entry) = upload_session_entry(&session.credential_key) {
+            let _ = entry.delete_credential();
+        }
+    }
+
+    Ok(())
+}
+
+fn drive_resume_state(
+    session: &DriveUploadSessionRecord,
+) -> Option<GoogleDriveUploadResumeState> {
+    if session.completed {
+        return None;
+    }
+
+    let session_uri = upload_session_entry(&session.credential_key)
+        .ok()?
+        .get_password()
+        .ok()?;
+
+    Some(GoogleDriveUploadResumeState {
+        source: session.source_path.clone(),
+        session_uri,
+        confirmed_offset: session.confirmed_offset,
+        total_size: session.total_size,
+        remote_name: session.remote_name.clone(),
+        mime_type: session.mime_type.clone(),
+        parent_id: session.parent_id.clone(),
+        chunk_size: session.chunk_size,
+        completed: session.completed,
+    })
 }
 
 fn auth_status(session: Option<&GoogleSession>) -> GoogleAuthStatus {
@@ -860,15 +950,15 @@ async fn enqueue_drive_upload(
     let chunk_size = chunk_mib
         .checked_mul(1024 * 1024)
         .ok_or_else(|| "Tamanho de bloco inválido".to_string())?;
+    let normalized_parent = parent_id.filter(|value| !value.trim().is_empty());
 
     let name = if files.len() == 1 {
         file_name_from_path(&files[0], "upload")
     } else {
         format!("{} arquivos para Google Drive", files.len())
     };
-    let destination = parent_id
+    let destination = normalized_parent
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
         .map(|value| format!("Google Drive / {value}"))
         .unwrap_or_else(|| "Google Drive / Meu Drive".to_string());
 
@@ -888,11 +978,48 @@ async fn enqueue_drive_upload(
         })
         .await?;
 
+    let mut session_records = Vec::with_capacity(files.len());
+    let mut credential_keys = HashMap::new();
+
+    for (index, source) in files.iter().enumerate() {
+        let metadata = tokio::fs::metadata(source)
+            .await
+            .map_err(|error| format!("Falha ao ler {source}: {error}"))?;
+
+        if !metadata.is_file() {
+            return Err(format!("{source} não é um arquivo regular"));
+        }
+
+        let credential_key = format!("{transfer_id}:{index}");
+        credential_keys.insert(source.clone(), credential_key.clone());
+
+        session_records.push(NewDriveUploadSessionRecord {
+            transfer_id: transfer_id.clone(),
+            source_path: source.clone(),
+            credential_key,
+            parent_id: normalized_parent.clone(),
+            remote_name: file_name_from_path(source, "upload.bin"),
+            mime_type: "application/octet-stream".to_string(),
+            total_size: metadata.len(),
+            chunk_size,
+        });
+    }
+
+    if let Err(error) = store.insert_drive_upload_sessions(session_records).await {
+        let _ = store.delete(&transfer_id).await;
+        return Err(error);
+    }
+
     let control = register_transfer(&transfer_id, control_state.inner()).await;
     let queue = queue_state.inner().clone();
     let controls = control_state.inner().clone();
     let task_store = store.inner().clone();
     let task_app = app.clone();
+    let checkpoint = drive_checkpoint_emitter(
+        transfer_id.clone(),
+        task_store.clone(),
+        Arc::new(credential_keys),
+    );
 
     notify_transfer_list(&app, &transfer_id);
 
@@ -900,7 +1027,7 @@ async fn enqueue_drive_upload(
         let permit = queue.slots.acquire_owned().await;
         if permit.is_err() {
             let _ = task_store
-                .update_status(&transfer_id, "failed", Some("Fila indisponível"))
+                .update_status(&transfer_id, "interrupted", Some("Fila indisponível"))
                 .await;
             notify_transfer_list(&task_app, &transfer_id);
             remove_transfer(&transfer_id, &controls).await;
@@ -917,11 +1044,11 @@ async fn enqueue_drive_upload(
         let _ = task_store.update_status(&transfer_id, "running", None).await;
         notify_transfer_list(&task_app, &transfer_id);
 
-        let result = upload_google_drive_batch_with_control(
+        let result = upload_google_drive_batch_resumable_with_control(
             GoogleDriveBatchUploadRequest {
                 files: files.into_iter().map(PathBuf::from).collect(),
                 access_token,
-                parent_id: parent_id.filter(|value| !value.trim().is_empty()),
+                parent_id: normalized_parent,
                 chunk_size,
                 links,
                 max_bytes_per_second: mbps_to_bytes_per_second(speed_limit_mbps),
@@ -929,6 +1056,8 @@ async fn enqueue_drive_upload(
             transfer_id.clone(),
             Some(progress_emitter(task_app.clone(), task_store.clone())),
             Some(control.clone()),
+            HashMap::new(),
+            Some(checkpoint),
         )
         .await;
 
@@ -943,7 +1072,7 @@ async fn enqueue_drive_upload(
             Err(error) => {
                 let message = error.to_string();
                 let _ = task_store
-                    .update_status(&transfer_id, "failed", Some(&message))
+                    .update_status(&transfer_id, "interrupted", Some(&message))
                     .await;
             }
         }
@@ -953,6 +1082,163 @@ async fn enqueue_drive_upload(
     });
 
     Ok(record)
+}
+
+#[tauri::command]
+async fn resume_drive_upload(
+    transfer_id: String,
+    app: AppHandle,
+    auth_state: State<'_, GoogleAuthState>,
+    queue_state: State<'_, QueueState>,
+    control_state: State<'_, TransferControlState>,
+    store: State<'_, TransferStore>,
+) -> Result<TransferRecord, String> {
+    let record = store
+        .get(&transfer_id)
+        .await?
+        .ok_or_else(|| "Transferência não encontrada".to_string())?;
+
+    if record.provider != "google_drive"
+        || record.direction != "upload"
+        || record.status != "interrupted"
+    {
+        return Err("Esta transferência não é um upload do Drive interrompido".to_string());
+    }
+
+    let access_token = current_google_access_token(auth_state.inner()).await?;
+    let links = parse_links(record.bind_ips.clone())?;
+    let sessions = store.list_drive_upload_sessions(&transfer_id).await?;
+
+    if sessions.is_empty() {
+        return Err("Não há metadados de sessão salvos para este upload".to_string());
+    }
+
+    let pending: Vec<DriveUploadSessionRecord> =
+        sessions.iter().filter(|session| !session.completed).cloned().collect();
+
+    if pending.is_empty() {
+        let total: u64 = sessions.iter().map(|session| session.total_size).sum();
+        store.complete(&transfer_id, total, Some(total)).await?;
+        notify_transfer_list(&app, &transfer_id);
+        return store
+            .get(&transfer_id)
+            .await?
+            .ok_or_else(|| "Transferência concluída não encontrada".to_string());
+    }
+
+    let chunk_size = pending[0].chunk_size;
+    if pending.iter().any(|session| session.chunk_size != chunk_size) {
+        return Err("Metadados de upload possuem tamanhos de bloco incompatíveis".to_string());
+    }
+
+    let parent_id = pending[0].parent_id.clone();
+    if pending.iter().any(|session| session.parent_id != parent_id) {
+        return Err("Metadados de upload possuem destinos incompatíveis".to_string());
+    }
+
+    let mut resume_sessions = HashMap::new();
+    let mut credential_keys = HashMap::new();
+
+    for session in &pending {
+        credential_keys.insert(
+            session.source_path.clone(),
+            session.credential_key.clone(),
+        );
+
+        if let Some(resume) = drive_resume_state(session) {
+            resume_sessions.insert(session.source_path.clone(), resume);
+        }
+    }
+
+    let files: Vec<PathBuf> = pending
+        .iter()
+        .map(|session| PathBuf::from(&session.source_path))
+        .collect();
+    let already_completed: u64 = sessions
+        .iter()
+        .filter(|session| session.completed)
+        .map(|session| session.total_size)
+        .sum();
+
+    let control = register_transfer(&transfer_id, control_state.inner()).await;
+    let controls = control_state.inner().clone();
+    let queue = queue_state.inner().clone();
+    let task_store = store.inner().clone();
+    let task_app = app.clone();
+    let checkpoint = drive_checkpoint_emitter(
+        transfer_id.clone(),
+        task_store.clone(),
+        Arc::new(credential_keys),
+    );
+    let speed_limit = record.max_bytes_per_second;
+
+    store.update_status(&transfer_id, "queued", None).await?;
+    notify_transfer_list(&app, &transfer_id);
+
+    tauri::async_runtime::spawn(async move {
+        let permit = queue.slots.acquire_owned().await;
+        if permit.is_err() {
+            let _ = task_store
+                .update_status(&transfer_id, "interrupted", Some("Fila indisponível"))
+                .await;
+            notify_transfer_list(&task_app, &transfer_id);
+            remove_transfer(&transfer_id, &controls).await;
+            return;
+        }
+
+        if control.is_cancelled() {
+            let _ = task_store.update_status(&transfer_id, "cancelled", None).await;
+            notify_transfer_list(&task_app, &transfer_id);
+            remove_transfer(&transfer_id, &controls).await;
+            return;
+        }
+
+        let _ = task_store.update_status(&transfer_id, "running", None).await;
+        notify_transfer_list(&task_app, &transfer_id);
+
+        let result = upload_google_drive_batch_resumable_with_control(
+            GoogleDriveBatchUploadRequest {
+                files,
+                access_token,
+                parent_id,
+                chunk_size,
+                links,
+                max_bytes_per_second: speed_limit,
+            },
+            transfer_id.clone(),
+            Some(progress_emitter(task_app.clone(), task_store.clone())),
+            Some(control.clone()),
+            resume_sessions,
+            Some(checkpoint),
+        )
+        .await;
+
+        match result {
+            Ok(results) => {
+                let resumed_total: u64 =
+                    results.iter().map(|item| item.bytes_uploaded).sum();
+                let total = already_completed.saturating_add(resumed_total);
+                let _ = task_store.complete(&transfer_id, total, Some(total)).await;
+            }
+            Err(_) if control.is_cancelled() => {
+                let _ = task_store.update_status(&transfer_id, "cancelled", None).await;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let _ = task_store
+                    .update_status(&transfer_id, "interrupted", Some(&message))
+                    .await;
+            }
+        }
+
+        notify_transfer_list(&task_app, &transfer_id);
+        remove_transfer(&transfer_id, &controls).await;
+    });
+
+    store
+        .get(&record.id)
+        .await?
+        .ok_or_else(|| "Transferência não encontrada após retomada".to_string())
 }
 
 #[tauri::command]
@@ -978,6 +1264,7 @@ async fn delete_transfer_history(
         return Err("Pare ou conclua a transferência antes de removê-la do histórico".to_string());
     }
 
+    let _ = cleanup_drive_upload_credentials(store.inner(), &transfer_id).await;
     store.delete(&transfer_id).await
 }
 
@@ -985,6 +1272,14 @@ async fn delete_transfer_history(
 async fn clear_finished_history(
     store: State<'_, TransferStore>,
 ) -> Result<usize, String> {
+    if let Ok(records) = store.list(1000).await {
+        for record in records {
+            if matches!(record.status.as_str(), "completed" | "failed" | "cancelled") {
+                let _ = cleanup_drive_upload_credentials(store.inner(), &record.id).await;
+            }
+        }
+    }
+
     store.clear_finished().await
 }
 
@@ -1741,6 +2036,7 @@ fn main() {
             enqueue_drive_export,
             enqueue_drive_download,
             enqueue_drive_upload,
+            resume_drive_upload,
             list_transfers,
             delete_transfer_history,
             clear_finished_history,
