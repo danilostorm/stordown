@@ -10,7 +10,9 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::{
-    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
+    header::{
+        ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE,
+    },
     Client, StatusCode,
 };
 use serde::{Deserialize, Serialize};
@@ -145,7 +147,7 @@ async fn probe_url(url: &str, headers: &HashMap<String, String>) -> Result<Probe
 
     if let Ok(response) = request_with_headers(client.head(url), headers).send().await {
         if response.status().is_success() {
-            let head_probe = probe_from_headers(response.headers(), false);
+            let head_probe = probe_from_response(&response, false);
 
             if head_probe.accepts_ranges && head_probe.size.is_some() {
                 return Ok(head_probe);
@@ -158,7 +160,7 @@ async fn probe_url(url: &str, headers: &HashMap<String, String>) -> Result<Probe
         .await?;
 
     if response.status() == StatusCode::PARTIAL_CONTENT {
-        let mut probe = probe_from_headers(response.headers(), true);
+        let mut probe = probe_from_response(&response, true);
 
         if probe.size.is_none() {
             probe.size = response
@@ -171,12 +173,13 @@ async fn probe_url(url: &str, headers: &HashMap<String, String>) -> Result<Probe
         return Ok(probe);
     }
 
-    let mut probe = probe_from_headers(response.headers(), false);
+    let mut probe = probe_from_response(&response, false);
     probe.accepts_ranges = false;
     Ok(probe)
 }
 
-fn probe_from_headers(headers: &reqwest::header::HeaderMap, partial: bool) -> ProbeResult {
+fn probe_from_response(response: &reqwest::Response, partial: bool) -> ProbeResult {
+    let headers = response.headers();
     let size = headers
         .get(CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
@@ -194,10 +197,88 @@ fn probe_from_headers(headers: &reqwest::header::HeaderMap, partial: bool) -> Pr
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
 
+    let suggested_name = headers
+        .get(CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(filename_from_content_disposition)
+        .or_else(|| filename_from_url(response.url()));
+
     ProbeResult {
         size,
         accepts_ranges,
         content_type,
+        suggested_name,
+        final_url: Some(response.url().to_string()),
+    }
+}
+
+fn filename_from_content_disposition(value: &str) -> Option<String> {
+    for part in value.split(';').map(str::trim) {
+        let lower = part.to_ascii_lowercase();
+
+        if lower.starts_with("filename*=") {
+            let raw = part.split_once('=')?.1.trim().trim_matches('"');
+            let raw = raw.split_once("''").map(|(_, value)| value).unwrap_or(raw);
+            let decoded = percent_decode_lossy(raw);
+            if let Some(name) = clean_filename(&decoded) {
+                return Some(name);
+            }
+        }
+
+        if lower.starts_with("filename=") {
+            let raw = part.split_once('=')?.1.trim().trim_matches('"');
+            if let Some(name) = clean_filename(raw) {
+                return Some(name);
+            }
+        }
+    }
+
+    None
+}
+
+fn filename_from_url(url: &url::Url) -> Option<String> {
+    let raw = url.path_segments()?.filter(|value| !value.is_empty()).last()?;
+    clean_filename(&percent_decode_lossy(raw))
+}
+
+fn clean_filename(value: &str) -> Option<String> {
+    let value = value.trim().replace(['/', '\\'], "_");
+    if value.is_empty() || value == "." || value == ".." {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn percent_decode_lossy(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hi = hex_value(bytes[index + 1]);
+            let lo = hex_value(bytes[index + 2]);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+        }
+
+        out.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }
 
