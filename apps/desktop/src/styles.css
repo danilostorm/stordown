@@ -1266,3 +1266,223 @@ input:focus, textarea:focus, select:focus {
     justify-content: flex-start;
   }
 }
+
+
+/* Download-manager shell refinements */
+.navIcon {
+  width: 22px;
+  display: inline-block;
+  text-align: center;
+  font-weight: 800;
+  color: #aab6ff;
+}
+
+.navItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+}
+
+.navItem.navCount {
+  justify-content: space-between;
+}
+
+.navItem.navCount > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.managerHome {
+  display: grid;
+  gap: 18px;
+}
+
+.quickActions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.actionTile {
+  min-height: 82px;
+  border: 1px solid #2a3550;
+  border-radius: 14px;
+  background: #101725;
+  color: #f7f8ff;
+  padding: 14px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  text-align: left;
+  cursor: pointer;
+}
+
+.actionTile > span {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  background: #1a2235;
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.actionTile.primary > span {
+  background: rgba(255,255,255,.16);
+}
+
+.actionTile div {
+  min-width: 0;
+}
+
+.actionTile strong,
+.actionTile small {
+  display: block;
+}
+
+.actionTile strong {
+  font-size: 13px;
+}
+
+.actionTile small {
+  color: #8390ac;
+  margin-top: 4px;
+  font-size: 10px;
+}
+
+.managerStats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.managerStats article {
+  border: 1px solid #232d43;
+  border-radius: 14px;
+  background: #0d1320;
+  padding: 14px 16px;
+}
+
+.managerStats span,
+.managerStats small {
+  display: block;
+  color: #7886a5;
+  font-size: 10px;
+}
+
+.managerStats strong {
+  display: block;
+  font-size: 22px;
+  margin: 5px 0 4px;
+  letter-spacing: -.02em;
+}
+
+.managerPanel {
+  border: 1px solid #232d43;
+  border-radius: 16px;
+  background: #0d1320;
+  overflow: hidden;
+}
+
+.managerPanelHeader {
+  padding: 14px 16px;
+  border-bottom: 1px solid #20293c;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.managerPanelHeader strong,
+.managerPanelHeader small {
+  display: block;
+}
+
+.managerPanelHeader small {
+  margin-top: 3px;
+  color: #7886a5;
+  font-size: 10px;
+}
+
+.managerPanelHeader button {
+  border: 1px solid #34405b;
+  border-radius: 9px;
+  background: #151d2d;
+  color: #dce3ff;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.managerPanel .transferList {
+  border: 0;
+  border-radius: 0;
+}
+
+.managerTransferRow {
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  padding: 13px 15px;
+}
+
+.managerTransferRow .transferKind {
+  width: 34px;
+  height: 34px;
+}
+
+.transferMetaManager {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.transferMetaManager .liveSpeed {
+  color: #8dd6ff;
+  font-weight: 800;
+}
+
+.downloadProbe {
+  color: #91a7ff;
+}
+
+.extensionSteps {
+  display: grid;
+  gap: 7px;
+  padding: 12px 13px;
+  border: 1px solid #27334b;
+  border-radius: 11px;
+  background: #0b111d;
+  color: #aab5cc;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.extensionSteps span {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.extensionSteps b {
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: #1b2640;
+  color: #dfe5ff;
+  font-size: 9px;
+}
+
+.extensionPrepared {
+  border-color: #2e5f4a;
+}
+
+@media (max-width: 1180px) {
+  .quickActions,
+  .managerStats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
