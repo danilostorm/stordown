@@ -13,6 +13,7 @@ The repository currently contains:
 - per-worker bind to local IPv4/IPv6 addresses;
 - multiple enabled links with weights;
 - Google Drive resumable upload engine;
+- native Google Drive folder picker with My Drive + Shared Drives browsing;
 - multiple-file Drive upload distribution across NICs/WANs;
 - CLI proof of concept for downloads and Drive uploads;
 - Tauri + React desktop interface with Download and Upload workspaces;
@@ -341,3 +342,15 @@ It can also scan the active page and submit up to 250 unique HTTP/HTTPS links to
 The desktop Settings screen can install the StorDown Native Messaging bridge for the current Windows user. The user pastes the extension ID once, and StorDown copies the native-host executable to LocalAppData, creates the host manifest and registers both Chrome and Edge HKCU NativeMessagingHosts entries.
 
 The repository PowerShell installer supports the same flow plus browser selection and uninstall. A future published/signed extension package will remove the remaining development step of manually loading the extension and copying its ID.
+
+
+## Google Drive destination browser
+
+The Upload workspace no longer requires users to manually copy a Google Drive folder ID. Once the account is connected, **Escolher pasta…** opens a native StorDown folder browser that supports:
+
+- My Drive;
+- Shared Drives;
+- nested folder navigation;
+- selecting the current folder as the upload destination.
+
+Older OAuth sessions may need to reconnect once because folder browsing adds the read-only Drive metadata scope.
