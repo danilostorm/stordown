@@ -71,6 +71,49 @@ pub struct GoogleDriveBatchUploadRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveItem {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size: Option<u64>,
+    pub drive_id: Option<String>,
+    pub can_download: bool,
+    pub md5_checksum: Option<String>,
+    pub is_folder: bool,
+    pub is_google_workspace: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDriveItemListResponse {
+    #[serde(default)]
+    files: Vec<GoogleDriveItemResponse>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDriveItemResponse {
+    id: String,
+    name: String,
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    #[serde(default)]
+    size: Option<String>,
+    #[serde(rename = "driveId")]
+    drive_id: Option<String>,
+    #[serde(default)]
+    capabilities: GoogleDriveCapabilities,
+    #[serde(rename = "md5Checksum")]
+    md5_checksum: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GoogleDriveCapabilities {
+    #[serde(rename = "canDownload", default)]
+    can_download: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleDriveFolder {
     pub id: String,
     pub name: String,
@@ -126,6 +169,98 @@ struct DriveFileResponse {
     size: Option<String>,
     #[serde(rename = "webViewLink")]
     web_view_link: Option<String>,
+}
+
+pub async fn list_google_drive_items(
+    access_token: &str,
+    parent_id: Option<&str>,
+    drive_id: Option<&str>,
+) -> Result<Vec<GoogleDriveItem>> {
+    let client = Client::new();
+    let parent = parent_id
+        .filter(|value| !value.trim().is_empty())
+        .or(drive_id.filter(|value| !value.trim().is_empty()))
+        .unwrap_or("root");
+
+    let query = format!(
+        "'{}' in parents and trashed = false",
+        escape_drive_query_literal(parent)
+    );
+
+    let mut page_token: Option<String> = None;
+    let mut items = Vec::new();
+
+    loop {
+        let mut request = client
+            .get(DRIVE_FILES_URL)
+            .bearer_auth(access_token)
+            .query(&[
+                ("q", query.as_str()),
+                ("spaces", "drive"),
+                ("supportsAllDrives", "true"),
+                ("includeItemsFromAllDrives", "true"),
+                ("pageSize", "1000"),
+                (
+                    "fields",
+                    "nextPageToken,files(id,name,mimeType,size,driveId,md5Checksum,capabilities(canDownload))",
+                ),
+                ("orderBy", "folder,name_natural"),
+            ]);
+
+        if let Some(drive_id) = drive_id.filter(|value| !value.trim().is_empty()) {
+            request = request.query(&[("corpora", "drive"), ("driveId", drive_id)]);
+        } else {
+            request = request.query(&[("corpora", "user")]);
+        }
+
+        if let Some(token) = page_token.as_deref() {
+            request = request.query(&[("pageToken", token)]);
+        }
+
+        let response = request
+            .send()
+            .await
+            .context("failed to list Google Drive items")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("Google Drive item list failed ({status}): {body}");
+        }
+
+        let page: GoogleDriveItemListResponse = response.json().await?;
+        items.extend(page.files.into_iter().map(|item| {
+            let is_folder = item.mime_type == DRIVE_FOLDER_MIME;
+            let is_google_workspace =
+                item.mime_type.starts_with("application/vnd.google-apps.") && !is_folder;
+
+            GoogleDriveItem {
+                id: item.id,
+                name: item.name,
+                mime_type: item.mime_type,
+                size: item.size.and_then(|value| value.parse::<u64>().ok()),
+                drive_id: item.drive_id,
+                can_download: item.capabilities.can_download,
+                md5_checksum: item.md5_checksum,
+                is_folder,
+                is_google_workspace,
+            }
+        }));
+
+        page_token = page.next_page_token;
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    Ok(items)
+}
+
+pub fn google_drive_media_url(file_id: &str) -> String {
+    format!(
+        "https://www.googleapis.com/drive/v3/files/{}?alt=media&supportsAllDrives=true",
+        file_id.trim()
+    )
 }
 
 pub async fn list_google_drive_folders(
@@ -1046,8 +1181,19 @@ fn backoff(attempt: usize) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_drive_query_literal, next_offset_from_range, validate_chunk_size};
+    use super::{
+        escape_drive_query_literal, google_drive_media_url, next_offset_from_range,
+        validate_chunk_size,
+    };
     use reqwest::header::HeaderValue;
+
+    #[test]
+    fn media_url_targets_drive_content_endpoint() {
+        assert_eq!(
+            google_drive_media_url("abc123"),
+            "https://www.googleapis.com/drive/v3/files/abc123?alt=media&supportsAllDrives=true"
+        );
+    }
 
     #[test]
     fn drive_query_literals_are_escaped() {

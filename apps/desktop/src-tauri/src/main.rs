@@ -13,11 +13,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use stordown_core::{
-    authorize_google_drive_desktop, download_with_control, list_google_drive_folders,
-    list_google_shared_drives, probe_links, refresh_google_access_token,
-    upload_google_drive_batch_with_control, DownloadRequest, GoogleDriveBatchUploadRequest,
-    GoogleDriveFolder, GoogleSharedDrive, LinkConfig, LinkProbeStatus, ProgressCallback,
-    TransferControl,
+    authorize_google_drive_desktop, download_with_control, google_drive_media_url,
+    list_google_drive_folders, list_google_drive_items, list_google_shared_drives, probe_links,
+    refresh_google_access_token, upload_google_drive_batch_with_control, DownloadRequest,
+    GoogleDriveBatchUploadRequest, GoogleDriveFolder, GoogleDriveItem, GoogleSharedDrive,
+    LinkConfig, LinkProbeStatus, ProgressCallback, TransferControl,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
@@ -348,6 +348,23 @@ async fn browse_google_drive_folders(
 }
 
 #[tauri::command]
+async fn browse_google_drive_items(
+    parent_id: Option<String>,
+    drive_id: Option<String>,
+    state: State<'_, GoogleAuthState>,
+) -> Result<Vec<GoogleDriveItem>, String> {
+    let access_token = current_google_access_token(state.inner()).await?;
+
+    list_google_drive_items(
+        &access_token,
+        parent_id.as_deref(),
+        drive_id.as_deref(),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn list_google_drive_roots(
     state: State<'_, GoogleAuthState>,
 ) -> Result<Vec<GoogleSharedDrive>, String> {
@@ -361,7 +378,7 @@ async fn current_google_access_token(state: &GoogleAuthState) -> Result<String, 
     let mut guard = state.session.lock().await;
     let session = guard
         .as_mut()
-        .ok_or_else(|| "Conecte sua conta Google Drive antes de iniciar o upload".to_string())?;
+        .ok_or_else(|| "Conecte sua conta Google Drive antes de usar recursos de nuvem".to_string())?;
 
     if Instant::now() < session.expires_at {
         return Ok(session.access_token.clone());
@@ -577,6 +594,81 @@ async fn enqueue_download(
         store.inner().clone(),
     )
     .await
+}
+
+#[tauri::command]
+async fn enqueue_drive_download(
+    file_id: String,
+    file_name: String,
+    mime_type: String,
+    output: String,
+    connections: usize,
+    bind_ips: Vec<String>,
+    speed_limit_mbps: Option<u64>,
+    transfer_id: String,
+    app: AppHandle,
+    auth_state: State<'_, GoogleAuthState>,
+    queue_state: State<'_, QueueState>,
+    control_state: State<'_, TransferControlState>,
+    store: State<'_, TransferStore>,
+) -> Result<TransferRecord, String> {
+    if file_id.trim().is_empty() {
+        return Err("Arquivo do Google Drive sem ID".to_string());
+    }
+
+    if mime_type.starts_with("application/vnd.google-apps.") {
+        return Err(
+            "Documentos Google Workspace precisam ser exportados; download Range direto é apenas para arquivos armazenados no Drive."
+                .to_string(),
+        );
+    }
+
+    parse_links(bind_ips.clone())?;
+    let access_token = current_google_access_token(auth_state.inner()).await?;
+    let media_url = google_drive_media_url(&file_id);
+    let max_bytes_per_second = mbps_to_bytes_per_second(speed_limit_mbps);
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "Authorization".to_string(),
+        format!("Bearer {access_token}"),
+    );
+
+    let record = store
+        .insert(NewTransferRecord {
+            id: transfer_id.clone(),
+            direction: "download".to_string(),
+            name: file_name,
+            source: format!("google-drive:{}", file_id.trim()),
+            destination: output.clone(),
+            provider: "google_drive".to_string(),
+            connections,
+            bind_ips: bind_ips.clone(),
+            scheduled_at: None,
+            max_bytes_per_second,
+            expected_sha256: None,
+        })
+        .await?;
+
+    notify_transfer_list(&app, &transfer_id);
+
+    spawn_download_execution(
+        media_url,
+        output,
+        connections,
+        bind_ips,
+        headers,
+        max_bytes_per_second,
+        None,
+        transfer_id,
+        None,
+        app,
+        queue_state.inner().clone(),
+        control_state.inner().clone(),
+        store.inner().clone(),
+    )?;
+
+    Ok(record)
 }
 
 #[tauri::command]
@@ -1480,6 +1572,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             enqueue_download,
+            enqueue_drive_download,
             enqueue_drive_upload,
             list_transfers,
             delete_transfer_history,
@@ -1501,6 +1594,7 @@ fn main() {
             restore_google_drive,
             google_drive_auth_status,
             browse_google_drive_folders,
+            browse_google_drive_items,
             list_google_drive_roots,
             disconnect_google_drive
         ])

@@ -49,9 +49,10 @@
 - [x] Secure refresh-token storage using the Windows credential store
 - [x] Drive browser / destination picker
 - [x] Shared Drive browsing
-- [ ] Shared links
-- [ ] Range-aware Drive downloads
+- [ ] Shared links / public Drive link import
+- [x] Range-aware blob-file Drive downloads with Smart Multi-WAN
 - [ ] Persist and resume Drive upload sessions after restart
+- [ ] Google Workspace document export
 - [ ] Rclone remote adapter
 
 ## V0.5 - Multi-WAN upload acceleration

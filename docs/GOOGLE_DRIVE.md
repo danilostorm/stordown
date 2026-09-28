@@ -34,7 +34,7 @@ The normal desktop upload flow no longer requires users to paste an access token
 
 For development, the Google Desktop OAuth client ID can be supplied in the UI or through `STORDOWN_GOOGLE_CLIENT_ID`. The distributed application will ship with the project's public client ID configured. Installed applications cannot treat a client secret as confidential, so the flow does not depend on embedding one.
 
-StorDown currently requests `https://www.googleapis.com/auth/drive.file`, keeping access narrower than full Drive-wide authorization. Broader scopes should only be introduced for features that truly require them.
+StorDown requests `https://www.googleapis.com/auth/drive.file` for files it creates/manages and `https://www.googleapis.com/auth/drive.readonly` for the native Cloud browser and Drive downloads. The read-only scope grants content access across the user's Drive and is a **restricted** Google scope, so a public StorDown distribution will need the appropriate Google OAuth verification before broad release.
 
 ## Multi-WAN behavior
 
@@ -71,9 +71,41 @@ The browser uses Drive metadata only; StorDown does not download file contents j
 
 ```text
 https://www.googleapis.com/auth/drive.file
-https://www.googleapis.com/auth/drive.metadata.readonly
+https://www.googleapis.com/auth/drive.readonly
 ```
 
-Existing development sessions created before this scope was added may need to be disconnected and authorized again so Google can grant metadata browsing.
+Existing sessions created before Drive content download was added must be disconnected and authorized again so Google can grant the new read-only content scope.
 
 Shared-drive folder listing uses `supportsAllDrives=true`, `includeItemsFromAllDrives=true`, and the selected shared-drive ID. Upload creation already uses `supportsAllDrives=true`, so choosing a writable folder in a Shared Drive feeds directly into the existing upload engine.
+
+
+## Range-aware Drive downloads
+
+The desktop **Cloud** workspace can browse files in My Drive and Shared Drives and enqueue regular Drive blob files into the same segmented downloader used for HTTP/HTTPS.
+
+The content endpoint is:
+
+```text
+GET https://www.googleapis.com/drive/v3/files/<fileId>?alt=media
+Authorization: Bearer <access token>
+Range: bytes=<start>-<end>
+```
+
+Google Drive supports byte-range partial downloads for blob files. StorDown therefore reuses its existing adaptive Range engine:
+
+```text
+Drive blob file
+   |
+   +-- Range A -> NIC1 -> WAN1
+   +-- Range B -> NIC2 -> WAN2
+   +-- Range C -> fastest healthy link
+   +-- failed range -> retry from saved bytes on another link
+```
+
+This includes Smart Multi-WAN scheduling, per-link telemetry, pause/resume, partial-part persistence and automatic segment failover.
+
+StorDown checks the Drive `capabilities.canDownload` metadata before enabling the Download button.
+
+Google Workspace-native files (Docs, Sheets, Slides and similar) are intentionally not sent through the Range engine because Drive export operations do not support partial Range downloads. Export support remains a separate roadmap item.
+
+The current Drive download job receives an access token when it is queued. Extremely long transfers that need to open new Drive requests after that access token expires may need token-refresh integration in the active worker; this is a follow-up hardening item.

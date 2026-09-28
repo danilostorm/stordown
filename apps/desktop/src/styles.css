@@ -1004,3 +1004,128 @@ input:focus, textarea:focus, select:focus {
     justify-self: start;
   }
 }
+
+
+.cloudWorkspace {
+  display: grid;
+  gap: 14px;
+}
+
+.cloudToolbar,
+.cloudPathBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cloudToolbar > button,
+.cloudPathBar > button {
+  border: 1px solid #34405a;
+  border-radius: 9px;
+  padding: 9px 11px;
+  background: #172033;
+  color: #eef1ff;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.cloudPathBar {
+  padding: 11px 13px;
+  border: 1px solid #283247;
+  border-radius: 12px;
+  background: #0d131f;
+}
+
+.cloudPathBar strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.cloudDownloadOptions {
+  display: grid;
+  grid-template-columns: 180px 220px;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid #20293b;
+  border-radius: 13px;
+  background: #0c111b;
+}
+
+.cloudItemList {
+  display: grid;
+  gap: 8px;
+}
+
+.cloudItemRow {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 13px 14px;
+  border: 1px solid #202a3c;
+  border-radius: 13px;
+  background: #0d131f;
+}
+
+.cloudItemIcon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: #151d2d;
+  font-size: 18px;
+}
+
+.cloudItemInfo {
+  min-width: 0;
+}
+
+.cloudItemInfo strong,
+.cloudItemInfo small {
+  display: block;
+}
+
+.cloudItemInfo strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.cloudItemInfo small {
+  margin-top: 4px;
+  color: #7d899f;
+  font-size: 10px;
+}
+
+.cloudItemRow .rowActions .primary {
+  justify-self: auto;
+  padding: 8px 12px;
+  font-size: 10px;
+}
+
+.cloudItemRow .rowActions button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+@media (max-width: 1080px) {
+  .cloudDownloadOptions {
+    grid-template-columns: 1fr;
+  }
+
+  .cloudItemRow {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .cloudItemRow .rowActions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+}

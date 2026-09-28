@@ -15,11 +15,11 @@ use url::Url;
 const AUTHORIZE_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 pub const DRIVE_FILE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
-pub const DRIVE_METADATA_READONLY_SCOPE: &str =
-    "https://www.googleapis.com/auth/drive.metadata.readonly";
+pub const DRIVE_READONLY_SCOPE: &str =
+    "https://www.googleapis.com/auth/drive.readonly";
 
 fn drive_scopes() -> String {
-    format!("{DRIVE_FILE_SCOPE} {DRIVE_METADATA_READONLY_SCOPE}")
+    format!("{DRIVE_FILE_SCOPE} {DRIVE_READONLY_SCOPE}")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,13 +238,13 @@ fn open_system_browser(_url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{drive_scopes, random_urlsafe, DRIVE_FILE_SCOPE, DRIVE_METADATA_READONLY_SCOPE};
+    use super::{drive_scopes, random_urlsafe, DRIVE_FILE_SCOPE, DRIVE_READONLY_SCOPE};
 
     #[test]
     fn google_drive_scope_set_supports_upload_and_metadata_browsing() {
         let scopes = drive_scopes();
         assert!(scopes.contains(DRIVE_FILE_SCOPE));
-        assert!(scopes.contains(DRIVE_METADATA_READONLY_SCOPE));
+        assert!(scopes.contains(DRIVE_READONLY_SCOPE));
     }
 
     #[test]
