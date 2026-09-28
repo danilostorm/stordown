@@ -2073,19 +2073,50 @@ export default function App() {
           <section className="settingsGrid">
             <section className="downloadCard browserInstaller">
               <div className="notice">
-                <strong>Integração Chrome / Edge</strong>
+                <strong>Extensão Chrome / Edge incluída</strong>
                 <span>
-                  Registra o Native Messaging Host do StorDown no Windows para a extensão
-                  conseguir enviar downloads direto para a fila.
+                  O instalador do StorDown agora leva a extensão e o Native Messaging Host junto.
+                  Não é necessário baixar outro pacote para começar.
                 </span>
               </div>
+
+              <div className="extensionSteps">
+                <span><b>1</b> Clique em <strong>Preparar extensão</strong>. A pasta será extraída e aberta.</span>
+                <span><b>2</b> Abra Chrome/Edge, ative o modo desenvolvedor e escolha <strong>Carregar sem compactação</strong>.</span>
+                <span><b>3</b> Selecione a pasta extraída, copie o ID de 32 caracteres e cole abaixo.</span>
+                <span><b>4</b> Clique em <strong>Conectar ao StorDown</strong>.</span>
+              </div>
+
+              <div className="browserInstallerActions">
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={prepareBrowserExtension}
+                  disabled={browserInstallBusy}
+                >
+                  {browserInstallBusy ? "Preparando…" : "Preparar extensão"}
+                </button>
+                <button type="button" onClick={() => openExtensionsPage("chrome")}>
+                  Chrome
+                </button>
+                <button type="button" onClick={() => openExtensionsPage("edge")}>
+                  Edge
+                </button>
+              </div>
+
+              {browserExtensionPrepared && (
+                <div className="browserInstallResult extensionPrepared">
+                  <strong>Extensão pronta para carregar</strong>
+                  <code>{browserExtensionPrepared.extension_dir}</code>
+                </div>
+              )}
 
               <label>
                 ID da extensão
                 <input
                   value={browserExtensionId}
-                  onChange={(event) => setBrowserExtensionId(event.target.value.trim())}
-                  placeholder="32 caracteres mostrados na página de extensões"
+                  onChange={(event) => setBrowserExtensionId(event.target.value.trim().toLowerCase())}
+                  placeholder="Cole o ID exibido pelo Chrome ou Edge"
                   maxLength={32}
                 />
               </label>
@@ -2097,24 +2128,13 @@ export default function App() {
                   onClick={installBrowserIntegration}
                   disabled={browserInstallBusy || browserExtensionId.length !== 32}
                 >
-                  {browserInstallBusy ? "Instalando…" : "Instalar integração"}
-                </button>
-                <button type="button" onClick={() => openExtensionsPage("chrome")}>
-                  Abrir Chrome
-                </button>
-                <button type="button" onClick={() => openExtensionsPage("edge")}>
-                  Abrir Edge
+                  {browserInstallBusy ? "Conectando…" : "Conectar ao StorDown"}
                 </button>
               </div>
 
-              <small className="fieldHint">
-                No modo de desenvolvimento, carregue a pasta browser-extension como extensão
-                descompactada, copie o ID mostrado pelo navegador e cole acima.
-              </small>
-
               {browserIntegration && (
                 <div className="browserInstallResult">
-                  <strong>Native Host instalado</strong>
+                  <strong>Extensão conectada ao aplicativo</strong>
                   <span>Chrome: {browserIntegration.chrome_registered ? "registrado" : "não registrado"}</span>
                   <span>Edge: {browserIntegration.edge_registered ? "registrado" : "não registrado"}</span>
                   <code>{browserIntegration.native_host_path}</code>
