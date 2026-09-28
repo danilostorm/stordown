@@ -49,6 +49,33 @@ pub struct NewTransferRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveUploadSessionRecord {
+    pub transfer_id: String,
+    pub source_path: String,
+    pub credential_key: String,
+    pub parent_id: Option<String>,
+    pub remote_name: String,
+    pub mime_type: String,
+    pub total_size: u64,
+    pub chunk_size: u64,
+    pub confirmed_offset: u64,
+    pub completed: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewDriveUploadSessionRecord {
+    pub transfer_id: String,
+    pub source_path: String,
+    pub credential_key: String,
+    pub parent_id: Option<String>,
+    pub remote_name: String,
+    pub mime_type: String,
+    pub total_size: u64,
+    pub chunk_size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadRule {
     pub id: i64,
     pub name: String,
@@ -128,6 +155,24 @@ impl TransferStore {
 
                 CREATE INDEX IF NOT EXISTS idx_download_rules_enabled_priority
                     ON download_rules(enabled, priority ASC, id ASC);
+
+                CREATE TABLE IF NOT EXISTS drive_upload_sessions (
+                    transfer_id TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    credential_key TEXT NOT NULL,
+                    parent_id TEXT,
+                    remote_name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    total_size INTEGER NOT NULL,
+                    chunk_size INTEGER NOT NULL,
+                    confirmed_offset INTEGER NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (transfer_id, source_path)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_drive_upload_sessions_transfer
+                    ON drive_upload_sessions(transfer_id, completed, updated_at);
                 "#,
             )
             .map_err(|error| format!("Falha ao preparar banco StorDown: {error}"))?;
@@ -187,6 +232,21 @@ impl TransferStore {
                     priority INTEGER NOT NULL DEFAULT 100,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE drive_upload_sessions (
+                    transfer_id TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    credential_key TEXT NOT NULL,
+                    parent_id TEXT,
+                    remote_name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    total_size INTEGER NOT NULL,
+                    chunk_size INTEGER NOT NULL,
+                    confirmed_offset INTEGER NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (transfer_id, source_path)
                 );
                 "#,
             )
@@ -365,6 +425,12 @@ impl TransferStore {
     pub async fn delete(&self, id: &str) -> Result<(), String> {
         let connection = self.connection.lock().await;
         connection
+            .execute(
+                "DELETE FROM drive_upload_sessions WHERE transfer_id = ?1",
+                params![id],
+            )
+            .map_err(|error| error.to_string())?;
+        connection
             .execute("DELETE FROM transfers WHERE id = ?1", params![id])
             .map_err(|error| error.to_string())?;
         Ok(())
@@ -392,6 +458,131 @@ impl TransferStore {
                  FROM transfers
                  WHERE status = 'scheduled' AND scheduled_at IS NOT NULL
                  ORDER BY scheduled_at ASC",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = statement
+            .query_map([], row_to_record)
+            .map_err(|error| error.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn insert_drive_upload_sessions(
+        &self,
+        records: Vec<NewDriveUploadSessionRecord>,
+    ) -> Result<(), String> {
+        let now = now_epoch();
+        let mut connection = self.connection.lock().await;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+
+        for record in records {
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO drive_upload_sessions (
+                        transfer_id, source_path, credential_key, parent_id, remote_name,
+                        mime_type, total_size, chunk_size, confirmed_offset, completed, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 0, ?9)",
+                    params![
+                        record.transfer_id,
+                        record.source_path,
+                        record.credential_key,
+                        record.parent_id,
+                        record.remote_name,
+                        record.mime_type,
+                        to_sql_i64(record.total_size),
+                        to_sql_i64(record.chunk_size),
+                        now,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    pub async fn list_drive_upload_sessions(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Vec<DriveUploadSessionRecord>, String> {
+        let connection = self.connection.lock().await;
+        let mut statement = connection
+            .prepare(
+                "SELECT transfer_id, source_path, credential_key, parent_id, remote_name,
+                        mime_type, total_size, chunk_size, confirmed_offset, completed, updated_at
+                 FROM drive_upload_sessions
+                 WHERE transfer_id = ?1
+                 ORDER BY source_path ASC",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = statement
+            .query_map(params![transfer_id], row_to_drive_upload_session)
+            .map_err(|error| error.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn update_drive_upload_checkpoint(
+        &self,
+        transfer_id: &str,
+        source_path: &str,
+        confirmed_offset: u64,
+        total_size: u64,
+        remote_name: &str,
+        mime_type: &str,
+        parent_id: Option<&str>,
+        chunk_size: u64,
+        completed: bool,
+    ) -> Result<(), String> {
+        let connection = self.connection.lock().await;
+        connection
+            .execute(
+                "UPDATE drive_upload_sessions
+                 SET confirmed_offset = MAX(confirmed_offset, ?3),
+                     total_size = ?4,
+                     remote_name = ?5,
+                     mime_type = ?6,
+                     parent_id = ?7,
+                     chunk_size = ?8,
+                     completed = ?9,
+                     updated_at = ?10
+                 WHERE transfer_id = ?1 AND source_path = ?2",
+                params![
+                    transfer_id,
+                    source_path,
+                    to_sql_i64(confirmed_offset),
+                    to_sql_i64(total_size),
+                    remote_name,
+                    mime_type,
+                    parent_id,
+                    to_sql_i64(chunk_size),
+                    i64::from(completed),
+                    now_epoch(),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        Ok(())
+    }
+
+    pub async fn list_interrupted_drive_uploads(&self) -> Result<Vec<TransferRecord>, String> {
+        let connection = self.connection.lock().await;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, direction, name, source, destination, provider, status,
+                        bytes_transferred, total_bytes, connections, bind_ips_json,
+                        created_at, updated_at, scheduled_at, max_bytes_per_second,
+                        expected_sha256, error
+                 FROM transfers
+                 WHERE status = 'interrupted'
+                   AND direction = 'upload'
+                   AND provider = 'google_drive'
+                 ORDER BY updated_at ASC",
             )
             .map_err(|error| error.to_string())?;
 
@@ -552,6 +743,29 @@ fn ensure_column(
     Ok(())
 }
 
+fn row_to_drive_upload_session(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<DriveUploadSessionRecord> {
+    let total_size: i64 = row.get(6)?;
+    let chunk_size: i64 = row.get(7)?;
+    let confirmed_offset: i64 = row.get(8)?;
+    let completed: i64 = row.get(9)?;
+
+    Ok(DriveUploadSessionRecord {
+        transfer_id: row.get(0)?,
+        source_path: row.get(1)?,
+        credential_key: row.get(2)?,
+        parent_id: row.get(3)?,
+        remote_name: row.get(4)?,
+        mime_type: row.get(5)?,
+        total_size: total_size.max(0) as u64,
+        chunk_size: chunk_size.max(0) as u64,
+        confirmed_offset: confirmed_offset.max(0) as u64,
+        completed: completed != 0,
+        updated_at: row.get(10)?,
+    })
+}
+
 fn row_to_download_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRule> {
     let extensions_json: String = row.get(2)?;
     let extensions =
@@ -661,6 +875,65 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(matched.name, "Vídeos");
+    }
+
+    #[tokio::test]
+    async fn persists_drive_upload_resume_metadata() {
+        let store = TransferStore::memory().unwrap();
+
+        store
+            .insert(NewTransferRecord {
+                id: "upload-1".to_string(),
+                direction: "upload".to_string(),
+                name: "movie.mkv".to_string(),
+                source: "C:\\Uploads\\movie.mkv".to_string(),
+                destination: "Google Drive / root".to_string(),
+                provider: "google_drive".to_string(),
+                connections: 1,
+                bind_ips: vec!["192.168.1.10".to_string()],
+                scheduled_at: None,
+                max_bytes_per_second: None,
+                expected_sha256: None,
+            })
+            .await
+            .unwrap();
+
+        store
+            .insert_drive_upload_sessions(vec![super::NewDriveUploadSessionRecord {
+                transfer_id: "upload-1".to_string(),
+                source_path: "C:\\Uploads\\movie.mkv".to_string(),
+                credential_key: "upload-1:0".to_string(),
+                parent_id: Some("root".to_string()),
+                remote_name: "movie.mkv".to_string(),
+                mime_type: "application/octet-stream".to_string(),
+                total_size: 1024,
+                chunk_size: 256,
+            }])
+            .await
+            .unwrap();
+
+        store
+            .update_drive_upload_checkpoint(
+                "upload-1",
+                "C:\\Uploads\\movie.mkv",
+                512,
+                1024,
+                "movie.mkv",
+                "application/octet-stream",
+                Some("root"),
+                256,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let sessions = store
+            .list_drive_upload_sessions("upload-1")
+            .await
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].confirmed_offset, 512);
+        assert!(!sessions[0].completed);
     }
 
     #[tokio::test]
