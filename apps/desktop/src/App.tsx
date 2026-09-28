@@ -113,34 +113,60 @@ type BrowserIntegrationResult = {
   edge_registered: boolean;
 };
 
+type BrowserExtensionPrepared = {
+  extension_dir: string;
+};
+
+type DesktopDefaults = {
+  download_dir: string;
+  interfaces: NetworkInterfaceInfo[];
+};
+
+type DownloadProbe = {
+  size?: number | null;
+  accepts_ranges: boolean;
+  content_type?: string | null;
+  suggested_name?: string | null;
+  final_url?: string | null;
+};
+
+type LiveTransferStats = {
+  speed: number;
+  bytesTransferred: number;
+  totalBytes?: number | null;
+  updatedAt: number;
+};
+
 type SpeedWindow = {
   startedAt: number;
   bytes: number;
 };
 
-type View = "download" | "upload" | "cloud" | "queue" | "scheduled" | "finished" | "settings";
+type View = "home" | "download" | "upload" | "cloud" | "queue" | "scheduled" | "finished" | "settings";
 
 const activeStatuses = new Set(["scheduled", "queued", "running", "paused", "interrupted"]);
 const finishedStatuses = new Set(["completed", "failed", "cancelled"]);
 
 export default function App() {
-  const [view, setView] = useState<View>("download");
+  const [view, setView] = useState<View>("home");
   const [url, setUrl] = useState("");
-  const [output, setOutput] = useState("C:\\Downloads\\arquivo.bin");
+  const [output, setOutput] = useState("");
+  const [defaultDownloadDir, setDefaultDownloadDir] = useState("");
+  const [downloadProbe, setDownloadProbe] = useState<DownloadProbe | null>(null);
+  const [inspectingUrl, setInspectingUrl] = useState(false);
+  const [outputManuallyEdited, setOutputManuallyEdited] = useState(false);
   const [connections, setConnections] = useState(8);
   const [downloadSchedule, setDownloadSchedule] = useState("");
   const [downloadSpeedLimit, setDownloadSpeedLimit] = useState(0);
   const [expectedSha256, setExpectedSha256] = useState("");
-  const [bindIps, setBindIps] = useState("192.168.30.101, 192.168.30.102");
-  const [status, setStatus] = useState("Pronto");
+  const [bindIps, setBindIps] = useState("");
+  const [status, setStatus] = useState("Inicializando…");
   const [busy, setBusy] = useState(false);
   const [networkBusy, setNetworkBusy] = useState(false);
   const [detectedNics, setDetectedNics] = useState<NetworkInterfaceInfo[]>([]);
   const [routeTests, setRouteTests] = useState<LinkProbeStatus[]>([]);
 
-  const [uploadFiles, setUploadFiles] = useState(
-    "C:\\Uploads\\arquivo1.mkv\nC:\\Uploads\\arquivo2.mkv",
-  );
+  const [uploadFiles, setUploadFiles] = useState("");
   const [driveParentId, setDriveParentId] = useState("");
   const [driveDestinationLabel, setDriveDestinationLabel] = useState("Meu Drive");
   const [driveBrowserOpen, setDriveBrowserOpen] = useState(false);
@@ -177,13 +203,16 @@ export default function App() {
   const [ruleId, setRuleId] = useState<number | null>(null);
   const [ruleName, setRuleName] = useState("Vídeos");
   const [ruleExtensions, setRuleExtensions] = useState("mkv, mp4, avi, mov");
-  const [ruleDestination, setRuleDestination] = useState("C:\\Downloads\\Vídeos");
+  const [ruleDestination, setRuleDestination] = useState("");
   const [ruleEnabled, setRuleEnabled] = useState(true);
   const [rulePriority, setRulePriority] = useState(100);
   const [browserExtensionId, setBrowserExtensionId] = useState("");
   const [browserInstallBusy, setBrowserInstallBusy] = useState(false);
   const [browserIntegration, setBrowserIntegration] = useState<BrowserIntegrationResult | null>(null);
+  const [browserExtensionPrepared, setBrowserExtensionPrepared] = useState<BrowserExtensionPrepared | null>(null);
+  const [liveTransferStats, setLiveTransferStats] = useState<Record<string, LiveTransferStats>>({});
   const speedWindows = useRef<Record<string, SpeedWindow>>({});
+  const transferSpeedWindows = useRef<Record<string, SpeedWindow>>({});
 
   const links = useMemo(
     () => bindIps.split(",").map((ip) => ip.trim()).filter(Boolean),
@@ -252,6 +281,15 @@ export default function App() {
     [records],
   );
 
+  const aggregateLiveSpeed = useMemo(
+    () =>
+      queuedRecords.reduce(
+        (sum, record) => sum + (liveTransferStats[record.id]?.speed ?? 0),
+        0,
+      ),
+    [queuedRecords, liveTransferStats],
+  );
+
   async function reloadTransfers() {
     try {
       const items = await invoke<TransferRecord[]>("list_transfers", { limit: 300 });
@@ -271,11 +309,15 @@ export default function App() {
   }
 
   useEffect(() => {
+    initializeDesktop();
     reloadTransfers();
     reloadDownloadRules();
 
     let stopProgress: undefined | (() => void);
     let stopList: undefined | (() => void);
+    const refreshTimer = window.setInterval(() => {
+      reloadTransfers();
+    }, 1500);
 
     listen<TransferProgress>("transfer-progress", ({ payload }) => {
       const progressKey = `${payload.transfer_id}:${payload.item}`;
@@ -302,12 +344,82 @@ export default function App() {
       currentWindow.bytes += payload.bytes_delta;
       const elapsed = now - currentWindow.startedAt;
 
-      if (elapsed >= 750 || payload.completed) {
+      if (elapsed >= 500 || payload.completed) {
         const bytesPerSecond = elapsed > 0 ? (currentWindow.bytes * 1000) / elapsed : 0;
         setLinkSpeeds((current) => ({ ...current, [key]: bytesPerSecond }));
         speedWindows.current[key] = { startedAt: now, bytes: 0 };
       } else {
         speedWindows.current[key] = currentWindow;
+      }
+
+      const transferKey = payload.transfer_id;
+      const transferWindow = transferSpeedWindows.current[transferKey] ?? {
+        startedAt: now,
+        bytes: 0,
+      };
+      transferWindow.bytes += payload.bytes_delta;
+      const transferElapsed = now - transferWindow.startedAt;
+
+      setLiveTransferStats((current) => {
+        const previous = current[transferKey];
+        const baseBytes = previous?.bytesTransferred ?? 0;
+        const nextBytes = Math.max(
+          baseBytes + payload.bytes_delta,
+          payload.direction === "download" ? payload.bytes_transferred : baseBytes + payload.bytes_delta,
+        );
+
+        return {
+          ...current,
+          [transferKey]: {
+            speed: previous?.speed ?? 0,
+            bytesTransferred: nextBytes,
+            totalBytes: payload.total_bytes ?? previous?.totalBytes ?? null,
+            updatedAt: now,
+          },
+        };
+      });
+
+      if (transferElapsed >= 500 || payload.completed) {
+        const speed = transferElapsed > 0 ? (transferWindow.bytes * 1000) / transferElapsed : 0;
+        setLiveTransferStats((current) => ({
+          ...current,
+          [transferKey]: {
+            speed: payload.completed ? 0 : speed,
+            bytesTransferred:
+              current[transferKey]?.bytesTransferred ?? payload.bytes_transferred,
+            totalBytes: payload.total_bytes ?? current[transferKey]?.totalBytes ?? null,
+            updatedAt: now,
+          },
+        }));
+        transferSpeedWindows.current[transferKey] = { startedAt: now, bytes: 0 };
+      } else {
+        transferSpeedWindows.current[transferKey] = transferWindow;
+      }
+
+      setRecords((current) =>
+        current.map((record) =>
+          record.id === payload.transfer_id
+            ? {
+                ...record,
+                status:
+                  payload.completed && record.direction === "download"
+                    ? "completed"
+                    : record.status === "paused"
+                      ? "paused"
+                      : "running",
+                bytes_transferred:
+                  payload.direction === "download"
+                    ? Math.max(record.bytes_transferred, payload.bytes_transferred)
+                    : record.bytes_transferred,
+                total_bytes: payload.total_bytes ?? record.total_bytes,
+                updated_at: Math.floor(now / 1000),
+              }
+            : record,
+        ),
+      );
+
+      if (payload.completed) {
+        reloadTransfers();
       }
     }).then((unlisten) => {
       stopProgress = unlisten;
@@ -320,10 +432,87 @@ export default function App() {
     });
 
     return () => {
+      window.clearInterval(refreshTimer);
       stopProgress?.();
       stopList?.();
     };
   }, []);
+
+  async function initializeDesktop() {
+    try {
+      const defaults = await invoke<DesktopDefaults>("get_desktop_defaults");
+      setDetectedNics(defaults.interfaces);
+
+      const detectedIps = defaults.interfaces.map((nic) => nic.ipv4);
+      const savedIps = (window.localStorage.getItem("stordown.bindIps") ?? "")
+        .split(",")
+        .map((ip) => ip.trim())
+        .filter((ip) => detectedIps.includes(ip));
+      const selectedIps = savedIps.length > 0 ? savedIps : detectedIps;
+
+      if (selectedIps.length > 0) {
+        setBindIps(selectedIps.join(", "));
+      }
+
+      const savedDownloadDir = window.localStorage.getItem("stordown.downloadDir");
+      const downloadDir = savedDownloadDir?.trim() || defaults.download_dir;
+      setDefaultDownloadDir(downloadDir);
+
+      const savedConnections = Number(window.localStorage.getItem("stordown.connections") ?? "8");
+      if (Number.isFinite(savedConnections) && savedConnections >= 1 && savedConnections <= 64) {
+        setConnections(savedConnections);
+      }
+
+      if (!output) {
+        setOutput(joinWindowsPath(downloadDir, "download.bin"));
+      }
+
+      if (!ruleDestination) {
+        setRuleDestination(downloadDir);
+      }
+
+      setStatus(
+        detectedIps.length > 1
+          ? `${detectedIps.length} interfaces detectadas — teste as WANs para confirmar saídas independentes`
+          : detectedIps.length === 1
+            ? "1 interface detectada — StorDown funcionará normalmente em modo single-link"
+            : "Nenhuma interface física foi detectada automaticamente",
+      );
+    } catch (error) {
+      setStatus(`Falha ao inicializar este computador: ${String(error)}`);
+    }
+  }
+
+  async function inspectDownloadUrl() {
+    if (!/^https?:\/\//i.test(url.trim())) {
+      setDownloadProbe(null);
+      return;
+    }
+
+    setInspectingUrl(true);
+
+    try {
+      const probe = await invoke<DownloadProbe>("inspect_download_url", { url: url.trim() });
+      setDownloadProbe(probe);
+
+      const name = probe.suggested_name || suggestedDownloadName(probe.final_url || url);
+      if (!outputManuallyEdited && name) {
+        const directory = parentDirectory(output) || defaultDownloadDir;
+        if (directory) {
+          setOutput(joinWindowsPath(directory, name));
+        }
+      }
+
+      setStatus(
+        `URL analisada: ${probe.size ? formatBytes(probe.size) : "tamanho desconhecido"} • ${probe.accepts_ranges ? "segmentação disponível" : "download direto"}`,
+      );
+    } catch (error) {
+      setDownloadProbe(null);
+      setStatus(`Não foi possível analisar a URL: ${String(error)}`);
+    } finally {
+      setInspectingUrl(false);
+    }
+  }
 
   async function detectNetworks() {
     setNetworkBusy(true);
@@ -335,7 +524,9 @@ export default function App() {
       setRouteTests([]);
 
       if (nics.length > 0) {
-        setBindIps(nics.map((nic) => nic.ipv4).join(", "));
+        const detected = nics.map((nic) => nic.ipv4);
+        setBindIps(detected.join(", "));
+        window.localStorage.setItem("stordown.bindIps", detected.join(","));
         setStatus(`${nics.length} interface(s) física(s) detectada(s)`);
       } else {
         setStatus("Nenhuma interface física ativa com IPv4 foi encontrada");
@@ -345,6 +536,21 @@ export default function App() {
     } finally {
       setNetworkBusy(false);
     }
+  }
+
+  function toggleNetworkInterface(ip: string, enabled: boolean) {
+    const selected = new Set(links);
+
+    if (enabled) {
+      selected.add(ip);
+    } else {
+      selected.delete(ip);
+    }
+
+    const next = Array.from(selected);
+    setBindIps(next.join(", "));
+    setRouteTests([]);
+    window.localStorage.setItem("stordown.bindIps", next.join(","));
   }
 
   async function testRoutes() {
@@ -759,12 +965,19 @@ export default function App() {
 
   async function chooseDownloadDestination() {
     try {
-      const picked = await invoke<string | null>("pick_download_destination", {
-        suggestedName: suggestedDownloadName(url),
-      });
+      const picked = await invoke<string | null>("pick_download_folder");
       if (picked) {
-        setOutput(picked);
-        setStatus("Destino selecionado");
+        const name = outputManuallyEdited
+          ? fileNameFromPath(output) || "download.bin"
+          : downloadProbe?.suggested_name ||
+            suggestedDownloadName(downloadProbe?.final_url || url) ||
+            fileNameFromPath(output) ||
+            "download.bin";
+        setDefaultDownloadDir(picked);
+        window.localStorage.setItem("stordown.downloadDir", picked);
+        setOutput(joinWindowsPath(picked, name));
+        setOutputManuallyEdited(false);
+        setStatus(`Pasta de destino: ${picked}`);
       }
     } catch (error) {
       setStatus(`Erro ao abrir seletor do Windows: ${String(error)}`);
@@ -914,6 +1127,21 @@ export default function App() {
     }
   }
 
+  async function prepareBrowserExtension() {
+    setBrowserInstallBusy(true);
+    setStatus("Preparando extensão Chrome/Edge incluída no StorDown…");
+
+    try {
+      const result = await invoke<BrowserExtensionPrepared>("prepare_browser_extension");
+      setBrowserExtensionPrepared(result);
+      setStatus("Extensão extraída. Ative o modo desenvolvedor e use 'Carregar sem compactação'.");
+    } catch (error) {
+      setStatus(`Erro ao preparar extensão: ${String(error)}`);
+    } finally {
+      setBrowserInstallBusy(false);
+    }
+  }
+
   async function installBrowserIntegration() {
     setBrowserInstallBusy(true);
     setStatus("Instalando integração Chrome/Edge…");
@@ -943,7 +1171,7 @@ export default function App() {
     setRuleId(null);
     setRuleName("Vídeos");
     setRuleExtensions("mkv, mp4, avi, mov");
-    setRuleDestination("C:\\Downloads\\Vídeos");
+    setRuleDestination(defaultDownloadDir || parentDirectory(output));
     setRuleEnabled(true);
     setRulePriority(100);
   }
@@ -1015,94 +1243,114 @@ export default function App() {
 
         <nav>
           <button
+            className={`navItem ${view === "home" ? "active" : ""}`}
+            onClick={() => setView("home")}
+          >
+            <span className="navIcon">⌂</span> Visão geral
+          </button>
+          <button
             className={`navItem ${view === "download" ? "active" : ""}`}
             onClick={() => setView("download")}
           >
-            Downloads
+            <span className="navIcon">↓</span> Novo download
           </button>
           <button
             className={`navItem ${view === "upload" ? "active" : ""}`}
             onClick={() => setView("upload")}
           >
-            Uploads
+            <span className="navIcon">↑</span> Novo upload
           </button>
           <button
             className={`navItem navCount ${view === "queue" ? "active" : ""}`}
             onClick={() => setView("queue")}
           >
-            <span>Fila</span>
+            <span><span className="navIcon">≡</span> Transferências</span>
             <b>{queuedRecords.length}</b>
           </button>
           <button
             className={`navItem navCount ${view === "scheduled" ? "active" : ""}`}
             onClick={() => setView("scheduled")}
           >
-            <span>Agendador</span>
+            <span><span className="navIcon">◷</span> Agendados</span>
             <b>{scheduledRecords.length}</b>
           </button>
           <button
             className={`navItem navCount ${view === "finished" ? "active" : ""}`}
             onClick={() => setView("finished")}
           >
-            <span>Finalizados</span>
+            <span><span className="navIcon">✓</span> Histórico</span>
             <b>{finishedRecords.length}</b>
           </button>
           <button
             className={`navItem ${view === "cloud" ? "active" : ""}`}
             onClick={openCloudWorkspace}
           >
-            Cloud
+            <span className="navIcon">☁</span> Google Drive
           </button>
           <button
             className={`navItem ${view === "settings" ? "active" : ""}`}
             onClick={() => setView("settings")}
           >
-            Configurações
+            <span className="navIcon">⚙</span> Configurações
           </button>
         </nav>
 
         <div className="networkCard">
-          <span>Multi-Link</span>
-          <strong>{links.length} links configurados</strong>
-          <div className="smartWanBadge">Smart balance + failover automático</div>
+          <span>Conexões de rede</span>
+          <strong>{links.length} selecionada(s)</strong>
+          <div className="smartWanBadge">
+            {links.length > 1 ? "Multi-WAN disponível para testar" : "Modo single-link disponível"}
+          </div>
 
-          {links.map((ip, index) => {
-            const nic = nicByIp.get(ip);
-            const probe = probeByIp.get(ip);
+          {detectedNics.length > 0 ? (
+            detectedNics.map((nic, index) => {
+              const ip = nic.ipv4;
+              const probe = probeByIp.get(ip);
+              const selected = links.includes(ip);
 
-            return (
-              <div className="networkLink" key={ip}>
-                <div className="linkRow">
-                  <i className={probe?.error ? "bad" : ""} />
-                  <span>{nic?.name ?? `Ethernet ${index + 1}`}</span>
-                  <code>{ip}</code>
-                </div>
-                <div className="linkMeta">
-                  {nic?.link_speed && <span>{nic.link_speed}</span>}
-                  {probe?.public_ip && (
-                    <span>
-                      WAN: {probe.public_ip} • {probe.latency_ms ?? "?"} ms
-                    </span>
-                  )}
-                  {probe?.error && <span className="errorText">Sem saída</span>}
-                  {linkSpeeds[ip] !== undefined && (
-                    <span className="speedText">{formatSpeed(linkSpeeds[ip])}</span>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+              return (
+                <label className={`networkLink networkChoice ${selected ? "selected" : ""}`} key={ip}>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={(event) => toggleNetworkInterface(ip, event.target.checked)}
+                  />
+                  <div className="networkChoiceBody">
+                    <div className="linkRow">
+                      <i className={probe?.error ? "bad" : ""} />
+                      <span>{nic.name || `Interface ${index + 1}`}</span>
+                      <code>{ip}</code>
+                    </div>
+                    <div className="linkMeta">
+                      {nic.link_speed && <span>{nic.link_speed}</span>}
+                      {probe?.public_ip && (
+                        <span>
+                          Internet: {probe.public_ip} • {probe.latency_ms ?? "?"} ms
+                        </span>
+                      )}
+                      {probe?.error && <span className="errorText">Sem saída</span>}
+                      {linkSpeeds[ip] !== undefined && (
+                        <span className="speedText">{formatSpeed(linkSpeeds[ip])}</span>
+                      )}
+                    </div>
+                  </div>
+                </label>
+              );
+            })
+          ) : (
+            <div className="networkEmpty">Nenhuma placa ativa detectada.</div>
+          )}
 
           <div className="networkActions">
             <button type="button" onClick={detectNetworks} disabled={networkBusy}>
-              Detectar placas
+              Redetectar
             </button>
             <button
               type="button"
               onClick={testRoutes}
               disabled={networkBusy || links.length === 0}
             >
-              Testar WANs
+              Testar saídas
             </button>
           </div>
         </div>
@@ -1111,12 +1359,112 @@ export default function App() {
       <section className="content">
         <header>
           <div>
-            <p className="eyebrow">STORDOWN V0.2 DEV</p>
+            <p className="eyebrow">STORDOWN 0.1 ALPHA</p>
             <h1>{viewTitle(view)}</h1>
             <p className="subtitle">{viewSubtitle(view)}</p>
           </div>
           <div className="statusPill">{status}</div>
         </header>
+
+        {view === "home" && (
+          <section className="managerHome">
+            <div className="quickActions">
+              <button type="button" className="primary actionTile" onClick={() => setView("download")}>
+                <span>↓</span>
+                <div>
+                  <strong>Novo download</strong>
+                  <small>HTTP/HTTPS, Range e Multi-WAN</small>
+                </div>
+              </button>
+              <button type="button" className="actionTile" onClick={() => setView("upload")}>
+                <span>↑</span>
+                <div>
+                  <strong>Novo upload</strong>
+                  <small>Google Drive resumível</small>
+                </div>
+              </button>
+              <button type="button" className="actionTile" onClick={openCloudWorkspace}>
+                <span>☁</span>
+                <div>
+                  <strong>Google Drive</strong>
+                  <small>Navegar, baixar e exportar</small>
+                </div>
+              </button>
+              <button type="button" className="actionTile" onClick={() => setView("settings")}>
+                <span>⊕</span>
+                <div>
+                  <strong>Extensão</strong>
+                  <small>Chrome / Edge</small>
+                </div>
+              </button>
+            </div>
+
+            <div className="managerStats">
+              <article>
+                <span>Velocidade total</span>
+                <strong>{formatSpeed(aggregateLiveSpeed)}</strong>
+                <small>somando transferências ativas</small>
+              </article>
+              <article>
+                <span>Em andamento</span>
+                <strong>{records.filter((record) => record.status === "running").length}</strong>
+                <small>{queuedRecords.length} item(ns) na fila</small>
+              </article>
+              <article>
+                <span>Links ativos</span>
+                <strong>{links.length}</strong>
+                <small>{routeTests.length ? "rotas testadas" : "teste as WANs nas configurações de rede"}</small>
+              </article>
+              <article>
+                <span>Concluídos</span>
+                <strong>{records.filter((record) => record.status === "completed").length}</strong>
+                <small>histórico persistente</small>
+              </article>
+            </div>
+
+            <section className="managerPanel">
+              <div className="managerPanelHeader">
+                <div>
+                  <strong>Transferências</strong>
+                  <small>Progresso, velocidade e tempo restante em tempo real</small>
+                </div>
+                <button type="button" onClick={() => setView("queue")}>Ver fila completa</button>
+              </div>
+              <TransferList
+                records={queuedRecords}
+                emptyText="Nenhuma transferência ativa. Adicione um download para começar."
+                selectedId={activeTransferId}
+                onSelect={setActiveTransferId}
+                onPause={pauseTransfer}
+                onResume={resumeTransfer}
+                onCancel={cancelTransfer}
+                onDelete={deleteHistory}
+                liveStats={liveTransferStats}
+              />
+            </section>
+
+            <section className="managerPanel">
+              <div className="managerPanelHeader">
+                <div>
+                  <strong>Recentes</strong>
+                  <small>Últimas transferências finalizadas</small>
+                </div>
+                <button type="button" onClick={() => setView("finished")}>Abrir histórico</button>
+              </div>
+              <TransferList
+                records={finishedRecords.slice(0, 5)}
+                emptyText="Ainda não há downloads concluídos."
+                selectedId={activeTransferId}
+                onSelect={setActiveTransferId}
+                onPause={pauseTransfer}
+                onResume={resumeTransfer}
+                onCancel={cancelTransfer}
+                onDelete={deleteHistory}
+                liveStats={liveTransferStats}
+              />
+            </section>
+          </section>
+        )}
 
         {view === "download" && (
           <form className="downloadCard" onSubmit={submitDownload}>
@@ -1130,22 +1478,50 @@ export default function App() {
 
             <label>
               URL
-              <input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://servidor/arquivo.iso"
-                required
-              />
+              <div className="fieldWithButton">
+                <input
+                  value={url}
+                  onChange={(e) => {
+                    setUrl(e.target.value);
+                    setDownloadProbe(null);
+                    setOutputManuallyEdited(false);
+                  }}
+                  onBlur={inspectDownloadUrl}
+                  placeholder="https://servidor/arquivo.iso"
+                  required
+                />
+                <button type="button" onClick={inspectDownloadUrl} disabled={inspectingUrl || !url.trim()}>
+                  {inspectingUrl ? "Analisando…" : "Analisar"}
+                </button>
+              </div>
+              {downloadProbe && (
+                <small className="fieldHint downloadProbe">
+                  {downloadProbe.suggested_name ?? "Nome não informado"} •{" "}
+                  {downloadProbe.size ? formatBytes(downloadProbe.size) : "tamanho desconhecido"} •{" "}
+                  {downloadProbe.accepts_ranges ? "HTTP Range / Multi-WAN" : "download direto"}
+                </small>
+              )}
             </label>
 
             <label>
-              Salvar em
+              Arquivo de destino
               <div className="fieldWithButton">
-                <input value={output} onChange={(e) => setOutput(e.target.value)} required />
+                <input
+                  value={output}
+                  onChange={(e) => {
+                    setOutput(e.target.value);
+                    setOutputManuallyEdited(true);
+                  }}
+                  placeholder="Pasta Downloads deste Windows"
+                  required
+                />
                 <button type="button" onClick={chooseDownloadDestination}>
-                  Procurar…
+                  Escolher pasta…
                 </button>
               </div>
+              <small className="fieldHint">
+                O StorDown usa a pasta Downloads deste computador e tenta obter o nome real pelo servidor.
+              </small>
             </label>
 
             <label>
@@ -1195,27 +1571,34 @@ export default function App() {
 
             <div className="grid2">
               <label>
-                Conexões
+                Conexões simultâneas por arquivo
                 <input
                   type="number"
                   min={1}
                   max={64}
                   value={connections}
-                  onChange={(e) => setConnections(Number(e.target.value))}
+                  onChange={(e) => {
+                    const value = Number(e.target.value);
+                    setConnections(value);
+                    window.localStorage.setItem("stordown.connections", String(value));
+                  }}
                 />
+                <small className="fieldHint">
+                  O StorDown distribui os blocos entre as interfaces selecionadas automaticamente.
+                </small>
               </label>
 
-              <label>
-                IPs das interfaces
-                <input
-                  value={bindIps}
-                  onChange={(e) => {
-                    setBindIps(e.target.value);
-                    setRouteTests([]);
-                  }}
-                  placeholder="Use Detectar placas ou informe os IPs"
-                />
-              </label>
+              <div className="selectedLinksSummary">
+                <span>Interfaces usadas</span>
+                <strong>{links.length || 0}</strong>
+                <small>
+                  {links.length > 1
+                    ? "Multi-link ativo. Use 'Testar saídas' para confirmar Internet independente."
+                    : links.length === 1
+                      ? "Single-link ativo. Funciona normalmente em qualquer PC."
+                      : "Selecione ao menos uma interface na barra lateral."}
+                </small>
+              </div>
             </div>
 
             <RoutePreview links={links} nics={nicByIp} probes={probeByIp} />
@@ -1700,6 +2083,7 @@ export default function App() {
             onResume={resumeTransfer}
             onCancel={cancelTransfer}
             onDelete={deleteHistory}
+            liveStats={liveTransferStats}
           />
         )}
 
@@ -1718,6 +2102,7 @@ export default function App() {
               onResume={resumeTransfer}
               onCancel={cancelTransfer}
               onDelete={deleteHistory}
+              liveStats={liveTransferStats}
             />
           </>
         )}
@@ -1739,6 +2124,7 @@ export default function App() {
               onResume={resumeTransfer}
               onCancel={cancelTransfer}
               onDelete={deleteHistory}
+              liveStats={liveTransferStats}
             />
           </>
         )}
@@ -1747,19 +2133,50 @@ export default function App() {
           <section className="settingsGrid">
             <section className="downloadCard browserInstaller">
               <div className="notice">
-                <strong>Integração Chrome / Edge</strong>
+                <strong>Extensão Chrome / Edge incluída</strong>
                 <span>
-                  Registra o Native Messaging Host do StorDown no Windows para a extensão
-                  conseguir enviar downloads direto para a fila.
+                  O instalador do StorDown agora leva a extensão e o Native Messaging Host junto.
+                  Não é necessário baixar outro pacote para começar.
                 </span>
               </div>
+
+              <div className="extensionSteps">
+                <span><b>1</b> Clique em <strong>Preparar extensão</strong>. A pasta será extraída e aberta.</span>
+                <span><b>2</b> Abra Chrome/Edge, ative o modo desenvolvedor e escolha <strong>Carregar sem compactação</strong>.</span>
+                <span><b>3</b> Selecione a pasta extraída, copie o ID de 32 caracteres e cole abaixo.</span>
+                <span><b>4</b> Clique em <strong>Conectar ao StorDown</strong>.</span>
+              </div>
+
+              <div className="browserInstallerActions">
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={prepareBrowserExtension}
+                  disabled={browserInstallBusy}
+                >
+                  {browserInstallBusy ? "Preparando…" : "Preparar extensão"}
+                </button>
+                <button type="button" onClick={() => openExtensionsPage("chrome")}>
+                  Chrome
+                </button>
+                <button type="button" onClick={() => openExtensionsPage("edge")}>
+                  Edge
+                </button>
+              </div>
+
+              {browserExtensionPrepared && (
+                <div className="browserInstallResult extensionPrepared">
+                  <strong>Extensão pronta para carregar</strong>
+                  <code>{browserExtensionPrepared.extension_dir}</code>
+                </div>
+              )}
 
               <label>
                 ID da extensão
                 <input
                   value={browserExtensionId}
-                  onChange={(event) => setBrowserExtensionId(event.target.value.trim())}
-                  placeholder="32 caracteres mostrados na página de extensões"
+                  onChange={(event) => setBrowserExtensionId(event.target.value.trim().toLowerCase())}
+                  placeholder="Cole o ID exibido pelo Chrome ou Edge"
                   maxLength={32}
                 />
               </label>
@@ -1771,24 +2188,13 @@ export default function App() {
                   onClick={installBrowserIntegration}
                   disabled={browserInstallBusy || browserExtensionId.length !== 32}
                 >
-                  {browserInstallBusy ? "Instalando…" : "Instalar integração"}
-                </button>
-                <button type="button" onClick={() => openExtensionsPage("chrome")}>
-                  Abrir Chrome
-                </button>
-                <button type="button" onClick={() => openExtensionsPage("edge")}>
-                  Abrir Edge
+                  {browserInstallBusy ? "Conectando…" : "Conectar ao StorDown"}
                 </button>
               </div>
 
-              <small className="fieldHint">
-                No modo de desenvolvimento, carregue a pasta browser-extension como extensão
-                descompactada, copie o ID mostrado pelo navegador e cole acima.
-              </small>
-
               {browserIntegration && (
                 <div className="browserInstallResult">
-                  <strong>Native Host instalado</strong>
+                  <strong>Extensão conectada ao aplicativo</strong>
                   <span>Chrome: {browserIntegration.chrome_registered ? "registrado" : "não registrado"}</span>
                   <span>Edge: {browserIntegration.edge_registered ? "registrado" : "não registrado"}</span>
                   <code>{browserIntegration.native_host_path}</code>
@@ -1974,7 +2380,7 @@ function RoutePreview({
             <small>
               {probe?.public_ip
                 ? `WAN ${index + 1}: ${probe.public_ip} • ${probe.latency_ms ?? "?"} ms`
-                : `→ regra UDM → WAN ${index + 1}`}
+                : "Saída ainda não testada"}
             </small>
           </div>
         );
@@ -1992,6 +2398,7 @@ function TransferList({
   onResume,
   onCancel,
   onDelete,
+  liveStats = {},
 }: {
   records: TransferRecord[];
   emptyText: string;
@@ -2001,23 +2408,30 @@ function TransferList({
   onResume: (id: string) => void;
   onCancel: (id: string) => void;
   onDelete: (id: string) => void;
+  liveStats?: Record<string, LiveTransferStats>;
 }) {
   if (records.length === 0) {
     return <div className="emptyState">{emptyText}</div>;
   }
 
   return (
-    <section className="transferList">
+    <section className="transferList managerTransferList">
       {records.map((record) => {
+        const live = liveStats[record.id];
+        const currentBytes = Math.max(record.bytes_transferred, live?.bytesTransferred ?? 0);
+        const total = live?.totalBytes ?? record.total_bytes ?? null;
         const percent =
-          record.total_bytes && record.total_bytes > 0
-            ? Math.min(100, (record.bytes_transferred / record.total_bytes) * 100)
+          total && total > 0
+            ? Math.min(100, (currentBytes / total) * 100)
             : 0;
+        const speed = record.status === "running" ? live?.speed ?? 0 : 0;
+        const remaining = total ? Math.max(0, total - currentBytes) : 0;
+        const etaSeconds = speed > 0 && remaining > 0 ? remaining / speed : null;
 
         return (
           <article
             key={record.id}
-            className={`transferRow ${selectedId === record.id ? "selected" : ""}`}
+            className={`transferRow managerTransferRow ${selectedId === record.id ? "selected" : ""}`}
             onClick={() => onSelect(record.id)}
           >
             <div className="transferKind">
@@ -2034,13 +2448,16 @@ function TransferList({
                 <div className="miniFill" style={{ width: `${percent}%` }} />
               </div>
 
-              <div className="transferMeta">
+              <div className="transferMeta transferMetaManager">
                 <span>{record.provider === "google_drive" ? "Google Drive" : "HTTP/HTTPS"}</span>
                 <span>
-                  {formatBytes(record.bytes_transferred)}
-                  {record.total_bytes ? ` / ${formatBytes(record.total_bytes)}` : ""}
+                  {formatBytes(currentBytes)}
+                  {total ? ` / ${formatBytes(total)}` : ""}
                 </span>
-                <span>{record.bind_ips.length} link(s)</span>
+                <span>{percent > 0 ? `${percent.toFixed(1)}%` : "—"}</span>
+                <span className="liveSpeed">{speed > 0 ? formatSpeed(speed) : "0 B/s"}</span>
+                {etaSeconds !== null && <span>Restante {formatDuration(etaSeconds)}</span>}
+                <span>{record.bind_ips.length || 1} link(s)</span>
                 {record.max_bytes_per_second ? (
                   <span>Limite {formatMbps(record.max_bytes_per_second)}</span>
                 ) : null}
@@ -2209,6 +2626,7 @@ function TransferTelemetry({
 }
 
 function viewTitle(view: View) {
+  if (view === "home") return "Gerenciador";
   if (view === "download") return "Novo download";
   if (view === "upload") return "Upload para Google Drive";
   if (view === "cloud") return "Google Drive";
@@ -2219,6 +2637,9 @@ function viewTitle(view: View) {
 }
 
 function viewSubtitle(view: View) {
+  if (view === "home") {
+    return "Acompanhe downloads e uploads em tempo real, com velocidade, progresso, ETA e uso das conexões.";
+  }
   if (view === "download") {
     return "Adicione downloads HTTP/HTTPS segmentados à fila Multi-WAN.";
   }
@@ -2271,6 +2692,35 @@ function formatMbps(bytesPerSecond: number) {
 
 function formatSpeed(bytesPerSecond: number) {
   return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function fileNameFromPath(path: string) {
+  const normalized = path.replace(/\//g, "\\");
+  return normalized.split("\\").filter(Boolean).pop() ?? "";
+}
+
+function parentDirectory(path: string) {
+  const normalized = path.replace(/\//g, "\\");
+  const index = normalized.lastIndexOf("\\");
+  return index > 0 ? normalized.slice(0, index) : "";
+}
+
+function joinWindowsPath(directory: string, name: string) {
+  const cleanDir = directory.trim().replace(/[\\/]+$/, "");
+  const cleanName = name.trim().replace(/[\\/:*?"<>|]/g, "_") || "download.bin";
+  return cleanDir ? `${cleanDir}\\${cleanName}` : cleanName;
+}
+
+function formatDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0s";
+  const rounded = Math.ceil(seconds);
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const secs = rounded % 60;
+
+  if (hours > 0) return `${hours}h ${minutes}min`;
+  if (minutes > 0) return `${minutes}min ${secs}s`;
+  return `${secs}s`;
 }
 
 function formatDate(epochSeconds: number) {

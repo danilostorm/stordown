@@ -3,22 +3,31 @@ name: Release Windows
 on:
   push:
     branches:
-      - "release/v0.1.0-alpha.1"
+      - "release/v*"
 
 permissions:
   contents: write
 
 jobs:
   build-release:
-    name: Build and publish v0.1.0-alpha.1
+    name: Build and publish Windows release
     runs-on: windows-latest
     env:
-      TAG: v0.1.0-alpha.1
       STORDOWN_GOOGLE_CLIENT_ID: ${{ secrets.STORDOWN_GOOGLE_CLIENT_ID }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          $package = Get-Content "apps/desktop/package.json" -Raw | ConvertFrom-Json
+          $version = $package.version
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "Desktop version is empty" }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Building StorDown v$version"
 
       - name: Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -38,6 +47,10 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace
 
+      - name: Build frontend
+        working-directory: apps/desktop
+        run: npm run build
+
       - name: Build Windows installer
         working-directory: apps/desktop
         run: npm run tauri build -- --bundles nsis
@@ -46,27 +59,34 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $version = $env:VERSION
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
 
-          $installer = Get-ChildItem -Path . -Filter "*.exe" -Recurse | Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" } | Select-Object -First 1
+          $installer = Get-ChildItem -Path . -Filter "*.exe" -Recurse |
+            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" } |
+            Select-Object -First 1
           if (-not $installer) { throw "NSIS installer was not found after Tauri build" }
-          Copy-Item $installer.FullName "release-assets/StorDown-v0.1.0-alpha.1-Windows-x64-Setup.exe"
+          Copy-Item $installer.FullName "release-assets/StorDown-v$version-Windows-x64-Setup.exe"
 
-          if (-not (Test-Path "target/release/stordown-native-host.exe")) { throw "stordown-native-host.exe was not built" }
-          if (-not (Test-Path "target/release/stordown-relay.exe")) { throw "stordown-relay.exe was not built" }
+          if (-not (Test-Path "target/release/stordown-native-host.exe")) {
+            throw "stordown-native-host.exe was not built"
+          }
+          if (-not (Test-Path "target/release/stordown-relay.exe")) {
+            throw "stordown-relay.exe was not built"
+          }
 
           New-Item -ItemType Directory -Force -Path "release-work/native-host" | Out-Null
           Copy-Item "target/release/stordown-native-host.exe" "release-work/native-host/"
           Copy-Item "browser-extension/native-host-manifest.example.json" "release-work/native-host/"
-          Compress-Archive -Path "release-work/native-host/*" -DestinationPath "release-assets/StorDown-Native-Host-v0.1.0-alpha.1.zip" -Force
+          Compress-Archive -Path "release-work/native-host/*" -DestinationPath "release-assets/StorDown-Native-Host-v$version.zip" -Force
 
-          Compress-Archive -Path "browser-extension/*" -DestinationPath "release-assets/StorDown-Browser-Extension-v0.1.0-alpha.1.zip" -Force
+          Compress-Archive -Path "browser-extension/*" -DestinationPath "release-assets/StorDown-Browser-Extension-v$version.zip" -Force
 
           New-Item -ItemType Directory -Force -Path "release-work/relay" | Out-Null
           Copy-Item "target/release/stordown-relay.exe" "release-work/relay/"
           Copy-Item "apps/relay/Dockerfile" "release-work/relay/"
           Copy-Item "docs/RELAY.md" "release-work/relay/"
-          Compress-Archive -Path "release-work/relay/*" -DestinationPath "release-assets/StorDown-Relay-v0.1.0-alpha.1-Windows-x64.zip" -Force
+          Compress-Archive -Path "release-work/relay/*" -DestinationPath "release-assets/StorDown-Relay-v$version-Windows-x64.zip" -Force
 
           $lines = Get-ChildItem "release-assets" -File | Sort-Object Name | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -79,7 +99,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stordown-v0.1.0-alpha.1-windows
+          name: stordown-windows-release
           path: release-assets/*
           if-no-files-found: error
 
@@ -91,9 +111,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release edit $env:TAG --target $env:GITHUB_SHA --title "StorDown v0.1.0-alpha.1" --notes-file RELEASE_NOTES.md --prerelease
+            gh release edit $env:TAG --target $env:GITHUB_SHA --title "StorDown $env:TAG" --notes-file RELEASE_NOTES.md --prerelease
           } else {
-            gh release create $env:TAG --target $env:GITHUB_SHA --title "StorDown v0.1.0-alpha.1" --notes-file RELEASE_NOTES.md --prerelease
+            gh release create $env:TAG --target $env:GITHUB_SHA --title "StorDown $env:TAG" --notes-file RELEASE_NOTES.md --prerelease
           }
 
           Get-ChildItem "release-assets" -File | ForEach-Object {

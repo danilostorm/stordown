@@ -40,6 +40,8 @@ pub struct ProbeResult {
     pub size: Option<u64>,
     pub accepts_ranges: bool,
     pub content_type: Option<String>,
+    pub suggested_name: Option<String>,
+    pub final_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

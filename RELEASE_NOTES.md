@@ -1,53 +1,77 @@
-# StorDown v0.1.0-alpha.1
+# StorDown v0.1.0-alpha.2
 
-Primeiro release instalável do StorDown para Windows.
+Alpha focada em transformar o StorDown de uma tela técnica de teste em um gerenciador de downloads utilizável em outros computadores.
 
-## Destaques
+## Interface e acompanhamento em tempo real
 
-- downloads HTTP/HTTPS segmentados com múltiplas conexões;
-- uso de múltiplas placas de rede e políticas Multi-WAN do UDM;
-- balanceamento adaptativo e failover automático entre links;
-- pause, resume, cancelamento, retry e retomada por partes;
-- fila unificada, histórico SQLite, categorias e agendamento;
-- limite de velocidade e verificação SHA-256 opcional;
-- integração Chrome/Edge via Native Messaging;
-- Google Drive com OAuth + PKCE, Meu Drive, Shared Drives e links compartilhados;
-- upload resumível do Google Drive com retomada após reiniciar o StorDown/Windows;
-- download de blobs do Drive por HTTP Range usando o motor Multi-WAN;
-- exportação de Docs, Sheets, Slides, Drawings e Apps Script;
-- StorDown Relay v1 para dividir um arquivo grande em chunks simultâneos por WAN1/WAN2 até um relay remoto;
-- Relay self-hosted para VPS/Unraid, com persistência de sessão e SHA-256.
+- nova tela **Visão geral** com aparência de gerenciador de downloads;
+- transferências ativas aparecem diretamente na tela inicial;
+- velocidade individual por transferência em tempo real;
+- velocidade total agregada;
+- porcentagem, bytes transferidos e ETA;
+- ações rápidas para novo download, upload, Google Drive e extensão;
+- fila e histórico continuam acessíveis pela barra lateral;
+- atualização periódica da fila para recuperar eventos perdidos e manter a tela sincronizada.
 
-## Arquivos do release
+## Portabilidade
 
-- `StorDown-v0.1.0-alpha.1-Windows-x64-Setup.exe`: instalador principal do StorDown;
-- `StorDown-Browser-Extension-v0.1.0-alpha.1.zip`: extensão Chrome/Edge para carregar em modo de desenvolvedor;
-- `StorDown-Native-Host-v0.1.0-alpha.1.zip`: ponte Native Messaging separada para diagnóstico/instalação manual;
-- `StorDown-Relay-v0.1.0-alpha.1-Windows-x64.zip`: relay Windows;
-- `SHA256SUMS.txt`: hashes dos artefatos.
+O StorDown não inicia mais com IPs, caminhos ou arquivos específicos da máquina de desenvolvimento.
 
-O instalador principal também carrega o Native Host como recurso do aplicativo para que a tela de integração do navegador consiga registrá-lo no Windows.
+Ao abrir em outro Windows ele agora:
 
-## Google Drive
+- encontra a pasta Downloads do próprio usuário;
+- detecta as placas físicas ativas;
+- funciona normalmente com apenas uma interface;
+- permite selecionar quais interfaces participarão do Multi-Link;
+- salva as interfaces escolhidas, pasta padrão e número de conexões localmente;
+- não exibe mais textos assumindo que existe UDM Pro;
+- permite testar se duas interfaces realmente saem por IPs públicos diferentes.
 
-Esta build suporta um Google OAuth Client ID fornecido pelo usuário na tela de desenvolvimento. Se o repositório tiver o secret `STORDOWN_GOOGLE_CLIENT_ID` configurado no GitHub, o workflow também o incorpora como fallback de build.
+O Multi-WAN continua dependendo de roteamento real independente. Em um computador com uma única conexão o StorDown opera como um gerenciador normal.
 
-Como o download completo do Drive usa `drive.readonly`, uma distribuição pública ampla do OAuth ainda depende da verificação correspondente do Google.
+## Nomes de arquivo
 
-## StorDown Relay
+- o StorDown consulta metadados HTTP antes do download;
+- usa `Content-Disposition` quando o servidor fornece o nome real;
+- segue redirecionamentos e usa a URL final como fallback;
+- o botão de destino agora escolhe **uma pasta**, em vez de abrir um diálogo que podia sugerir nomes estranhos;
+- downloads capturados pelo navegador também tentam resolver o nome real pelo servidor;
+- nomes duplicados recebem apenas o sufixo `(1)`, `(2)` etc.
 
-O Relay v1 já soma WANs no trecho PC -> Relay:
+## Chrome / Edge
 
-```text
-arquivo grande
-  -> NIC1/WAN1 --+
-  -> NIC2/WAN2 --+-> StorDown Relay -> arquivo montado/verificado
-```
+A extensão passa a fazer parte do próprio instalador.
 
-Nesta alpha o Relay é um endpoint de staging. O adaptador Relay -> Google Drive fica para uma atualização posterior e não bloqueia o gerenciador desktop, Drive direto ou os testes Multi-WAN.
+Em **Configurações > Extensão Chrome / Edge**:
 
-## Observações da alpha
+1. clique em **Preparar extensão**;
+2. StorDown extrai e abre a pasta da extensão;
+3. carregue a pasta em modo desenvolvedor no Chrome/Edge;
+4. copie o ID mostrado pelo navegador;
+5. clique em **Conectar ao StorDown**.
 
-- instalador ainda não possui assinatura Authenticode comercial, então o Windows SmartScreen pode exibir aviso;
-- extensão ainda não está publicada na Chrome Web Store / Edge Add-ons; use o ZIP incluído;
-- foco deste release é Windows x64.
+O Native Messaging Host também continua incluído no pacote.
+
+## Google Drive e Multi-WAN
+
+Mantidos nesta alpha:
+
+- OAuth + PKCE;
+- Meu Drive e Shared Drives;
+- links compartilhados e resource keys;
+- upload resumível com sessão persistente;
+- download HTTP Range Multi-WAN;
+- exportação Google Workspace;
+- StorDown Relay v1.
+
+## Arquivos da release
+
+- `StorDown-v0.1.0-alpha.2-Windows-x64-Setup.exe`
+- `StorDown-Browser-Extension-v0.1.0-alpha.2.zip`
+- `StorDown-Native-Host-v0.1.0-alpha.2.zip`
+- `StorDown-Relay-v0.1.0-alpha.2-Windows-x64.zip`
+- `SHA256SUMS.txt`
+
+## Observações
+
+Esta ainda é uma alpha. O instalador não possui assinatura Authenticode comercial e o Windows SmartScreen pode exibir aviso.
