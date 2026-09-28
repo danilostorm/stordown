@@ -15,6 +15,9 @@ use url::Url;
 const AUTHORIZE_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 pub const DRIVE_FILE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
+pub const DRIVE_METADATA_SCOPE: &str = "https://www.googleapis.com/auth/drive.metadata.readonly";
+pub const DRIVE_SCOPES: &str =
+    "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GoogleOAuthTokens {
@@ -63,7 +66,7 @@ pub async fn authorize_google_drive_desktop(client_id: &str) -> Result<GoogleOAu
         .append_pair("client_id", client_id.trim())
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("response_type", "code")
-        .append_pair("scope", DRIVE_FILE_SCOPE)
+        .append_pair("scope", DRIVE_SCOPES)
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", &state)
