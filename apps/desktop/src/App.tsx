@@ -113,34 +113,60 @@ type BrowserIntegrationResult = {
   edge_registered: boolean;
 };
 
+type BrowserExtensionPrepared = {
+  extension_dir: string;
+};
+
+type DesktopDefaults = {
+  download_dir: string;
+  interfaces: NetworkInterfaceInfo[];
+};
+
+type DownloadProbe = {
+  size?: number | null;
+  accepts_ranges: boolean;
+  content_type?: string | null;
+  suggested_name?: string | null;
+  final_url?: string | null;
+};
+
+type LiveTransferStats = {
+  speed: number;
+  bytesTransferred: number;
+  totalBytes?: number | null;
+  updatedAt: number;
+};
+
 type SpeedWindow = {
   startedAt: number;
   bytes: number;
 };
 
-type View = "download" | "upload" | "cloud" | "queue" | "scheduled" | "finished" | "settings";
+type View = "home" | "download" | "upload" | "cloud" | "queue" | "scheduled" | "finished" | "settings";
 
 const activeStatuses = new Set(["scheduled", "queued", "running", "paused", "interrupted"]);
 const finishedStatuses = new Set(["completed", "failed", "cancelled"]);
 
 export default function App() {
-  const [view, setView] = useState<View>("download");
+  const [view, setView] = useState<View>("home");
   const [url, setUrl] = useState("");
-  const [output, setOutput] = useState("C:\\Downloads\\arquivo.bin");
+  const [output, setOutput] = useState("");
+  const [defaultDownloadDir, setDefaultDownloadDir] = useState("");
+  const [downloadProbe, setDownloadProbe] = useState<DownloadProbe | null>(null);
+  const [inspectingUrl, setInspectingUrl] = useState(false);
+  const [outputManuallyEdited, setOutputManuallyEdited] = useState(false);
   const [connections, setConnections] = useState(8);
   const [downloadSchedule, setDownloadSchedule] = useState("");
   const [downloadSpeedLimit, setDownloadSpeedLimit] = useState(0);
   const [expectedSha256, setExpectedSha256] = useState("");
-  const [bindIps, setBindIps] = useState("192.168.30.101, 192.168.30.102");
-  const [status, setStatus] = useState("Pronto");
+  const [bindIps, setBindIps] = useState("");
+  const [status, setStatus] = useState("Inicializando…");
   const [busy, setBusy] = useState(false);
   const [networkBusy, setNetworkBusy] = useState(false);
   const [detectedNics, setDetectedNics] = useState<NetworkInterfaceInfo[]>([]);
   const [routeTests, setRouteTests] = useState<LinkProbeStatus[]>([]);
 
-  const [uploadFiles, setUploadFiles] = useState(
-    "C:\\Uploads\\arquivo1.mkv\nC:\\Uploads\\arquivo2.mkv",
-  );
+  const [uploadFiles, setUploadFiles] = useState("");
   const [driveParentId, setDriveParentId] = useState("");
   const [driveDestinationLabel, setDriveDestinationLabel] = useState("Meu Drive");
   const [driveBrowserOpen, setDriveBrowserOpen] = useState(false);
@@ -177,13 +203,16 @@ export default function App() {
   const [ruleId, setRuleId] = useState<number | null>(null);
   const [ruleName, setRuleName] = useState("Vídeos");
   const [ruleExtensions, setRuleExtensions] = useState("mkv, mp4, avi, mov");
-  const [ruleDestination, setRuleDestination] = useState("C:\\Downloads\\Vídeos");
+  const [ruleDestination, setRuleDestination] = useState("");
   const [ruleEnabled, setRuleEnabled] = useState(true);
   const [rulePriority, setRulePriority] = useState(100);
   const [browserExtensionId, setBrowserExtensionId] = useState("");
   const [browserInstallBusy, setBrowserInstallBusy] = useState(false);
   const [browserIntegration, setBrowserIntegration] = useState<BrowserIntegrationResult | null>(null);
+  const [browserExtensionPrepared, setBrowserExtensionPrepared] = useState<BrowserExtensionPrepared | null>(null);
+  const [liveTransferStats, setLiveTransferStats] = useState<Record<string, LiveTransferStats>>({});
   const speedWindows = useRef<Record<string, SpeedWindow>>({});
+  const transferSpeedWindows = useRef<Record<string, SpeedWindow>>({});
 
   const links = useMemo(
     () => bindIps.split(",").map((ip) => ip.trim()).filter(Boolean),
