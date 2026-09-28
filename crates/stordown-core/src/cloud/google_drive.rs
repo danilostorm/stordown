@@ -28,9 +28,27 @@ use tokio::{
 
 const DRIVE_UPLOAD_URL: &str =
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id,name,size,webViewLink";
+const DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files";
 const DRIVE_CHUNK_GRANULARITY: u64 = 256 * 1024;
 const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_CHUNK_RETRIES: usize = 5;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleDriveFolder {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub parents: Vec<String>,
+    pub drive_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleDriveFolderListResponse {
+    #[serde(default)]
+    files: Vec<GoogleDriveFolder>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct GoogleDriveUploadRequest {
@@ -86,6 +104,71 @@ struct DriveFileResponse {
     size: Option<String>,
     #[serde(rename = "webViewLink")]
     web_view_link: Option<String>,
+}
+
+pub async fn list_google_drive_folders(
+    access_token: &str,
+    parent_id: Option<&str>,
+) -> Result<Vec<GoogleDriveFolder>> {
+    let parent = parent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("root");
+    let escaped_parent = parent.replace('\\', "\\\\").replace('\'', "\\'");
+    let query = format!(
+        "'{escaped_parent}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    );
+
+    let client = Client::new();
+    let mut page_token: Option<String> = None;
+    let mut folders = Vec::new();
+
+    loop {
+        let mut request = client
+            .get(DRIVE_FILES_URL)
+            .bearer_auth(access_token)
+            .query(&[
+                ("q", query.as_str()),
+                ("spaces", "drive"),
+                ("orderBy", "name_natural"),
+                ("pageSize", "100"),
+                (
+                    "fields",
+                    "nextPageToken,files(id,name,parents,driveId)",
+                ),
+                ("supportsAllDrives", "true"),
+                ("includeItemsFromAllDrives", "true"),
+            ]);
+
+        if let Some(token) = page_token.as_deref() {
+            request = request.query(&[("pageToken", token)]);
+        }
+
+        let response = request
+            .send()
+            .await
+            .context("failed to list Google Drive folders")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("Google Drive folder listing failed ({status}): {body}");
+        }
+
+        let page: GoogleDriveFolderListResponse = response
+            .json()
+            .await
+            .context("invalid Google Drive folder-list response")?;
+
+        folders.extend(page.files);
+        page_token = page.next_page_token;
+
+        if page_token.is_none() || folders.len() >= 1000 {
+            break;
+        }
+    }
+
+    Ok(folders)
 }
 
 pub async fn upload_google_drive_file(
