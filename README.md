@@ -29,6 +29,7 @@ The repository currently contains:
 - Chrome/Edge native-messaging bridge with context-menu and automatic capture;
 - explicit per-site cookie handoff for authenticated browser downloads;
 - browser per-site capture/ignore policies and active-page batch link capture;
+- desktop one-click Native Messaging registration for Chrome and Edge;
 - automatic download categories and extension-based destination rules;
 - persistent HTTP download scheduler with restart recovery;
 - adaptive Multi-WAN chunk scheduling with automatic link failover;
@@ -333,3 +334,10 @@ Scheduled downloads persist both the speed limit and expected SHA256 in SQLite, 
 The Chrome/Edge extension can override global automatic capture per origin with **inherit**, **always capture** or **never capture** policies.
 
 It can also scan the active page and submit up to 250 unique HTTP/HTTPS links to StorDown, using a small bounded concurrency so the Native Messaging bridge is not flooded. Each accepted URL still goes through the normal Windows NIC detection, category rules, persistent queue and Multi-WAN download engine.
+
+
+## Chrome / Edge integration installer
+
+The desktop Settings screen can install the StorDown Native Messaging bridge for the current Windows user. The user pastes the extension ID once, and StorDown copies the native-host executable to LocalAppData, creates the host manifest and registers both Chrome and Edge HKCU NativeMessagingHosts entries.
+
+The repository PowerShell installer supports the same flow plus browser selection and uninstall. A future published/signed extension package will remove the remaining development step of manually loading the extension and copying its ID.

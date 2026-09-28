@@ -70,6 +70,13 @@ type DownloadRule = {
   updated_at: number;
 };
 
+type BrowserIntegrationResult = {
+  manifest_path: string;
+  native_host_path: string;
+  chrome_registered: boolean;
+  edge_registered: boolean;
+};
+
 type SpeedWindow = {
   startedAt: number;
   bytes: number;
@@ -116,6 +123,9 @@ export default function App() {
   const [ruleDestination, setRuleDestination] = useState("C:\\Downloads\\Vídeos");
   const [ruleEnabled, setRuleEnabled] = useState(true);
   const [rulePriority, setRulePriority] = useState(100);
+  const [browserExtensionId, setBrowserExtensionId] = useState("");
+  const [browserInstallBusy, setBrowserInstallBusy] = useState(false);
+  const [browserIntegration, setBrowserIntegration] = useState<BrowserIntegrationResult | null>(null);
   const speedWindows = useRef<Record<string, SpeedWindow>>({});
 
   const links = useMemo(
@@ -491,6 +501,31 @@ export default function App() {
       setStatus(`${removed} item(ns) removido(s) do histórico`);
     } catch (error) {
       setStatus(`Erro ao limpar histórico: ${String(error)}`);
+    }
+  }
+
+  async function installBrowserIntegration() {
+    setBrowserInstallBusy(true);
+    setStatus("Instalando integração Chrome/Edge…");
+
+    try {
+      const result = await invoke<BrowserIntegrationResult>("install_browser_integration", {
+        extensionId: browserExtensionId,
+      });
+      setBrowserIntegration(result);
+      setStatus("Integração do navegador instalada");
+    } catch (error) {
+      setStatus(`Erro ao instalar integração: ${String(error)}`);
+    } finally {
+      setBrowserInstallBusy(false);
+    }
+  }
+
+  async function openExtensionsPage(browser: "chrome" | "edge") {
+    try {
+      await invoke("open_browser_extensions", { browser });
+    } catch (error) {
+      setStatus(`Erro ao abrir extensões: ${String(error)}`);
     }
   }
 
@@ -959,6 +994,56 @@ export default function App() {
 
         {view === "settings" && (
           <section className="settingsGrid">
+            <section className="downloadCard browserInstaller">
+              <div className="notice">
+                <strong>Integração Chrome / Edge</strong>
+                <span>
+                  Registra o Native Messaging Host do StorDown no Windows para a extensão
+                  conseguir enviar downloads direto para a fila.
+                </span>
+              </div>
+
+              <label>
+                ID da extensão
+                <input
+                  value={browserExtensionId}
+                  onChange={(event) => setBrowserExtensionId(event.target.value.trim())}
+                  placeholder="32 caracteres mostrados na página de extensões"
+                  maxLength={32}
+                />
+              </label>
+
+              <div className="browserInstallerActions">
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={installBrowserIntegration}
+                  disabled={browserInstallBusy || browserExtensionId.length !== 32}
+                >
+                  {browserInstallBusy ? "Instalando…" : "Instalar integração"}
+                </button>
+                <button type="button" onClick={() => openExtensionsPage("chrome")}>
+                  Abrir Chrome
+                </button>
+                <button type="button" onClick={() => openExtensionsPage("edge")}>
+                  Abrir Edge
+                </button>
+              </div>
+
+              <small className="fieldHint">
+                No modo de desenvolvimento, carregue a pasta browser-extension como extensão
+                descompactada, copie o ID mostrado pelo navegador e cole acima.
+              </small>
+
+              {browserIntegration && (
+                <div className="browserInstallResult">
+                  <strong>Native Host instalado</strong>
+                  <span>Chrome: {browserIntegration.chrome_registered ? "registrado" : "não registrado"}</span>
+                  <span>Edge: {browserIntegration.edge_registered ? "registrado" : "não registrado"}</span>
+                  <code>{browserIntegration.native_host_path}</code>
+                </div>
+              )}
+            </section>
             <form className="downloadCard ruleEditor" onSubmit={saveRule}>
               <div className="notice">
                 <strong>Categorias automáticas de download</strong>

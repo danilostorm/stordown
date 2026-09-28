@@ -783,3 +783,54 @@ input:focus, textarea:focus, select:focus {
   font-weight: 800;
   line-height: 1.35;
 }
+
+
+.browserInstallerActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  align-items: center;
+}
+
+.browserInstallerActions button:not(.primary) {
+  border: 1px solid #303a50;
+  border-radius: 10px;
+  padding: 11px 14px;
+  background: #151c2a;
+  color: #d7ddec;
+  cursor: pointer;
+}
+
+.browserInstallerActions button:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.browserInstallResult {
+  display: grid;
+  gap: 5px;
+  margin-top: 4px;
+  padding: 12px;
+  border: 1px solid rgba(85, 217, 139, .25);
+  border-radius: 11px;
+  background: rgba(85, 217, 139, .06);
+}
+
+.browserInstallResult strong {
+  color: #83e6b4;
+  font-size: 12px;
+}
+
+.browserInstallResult span {
+  color: #aab5ca;
+  font-size: 10px;
+}
+
+.browserInstallResult code {
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #7e8ca7;
+  font-size: 9px;
+}
