@@ -11,7 +11,7 @@ Large files use the Google Drive API resumable upload flow:
 3. Send file chunks with `Content-Range`.
 4. Retry interrupted chunks.
 5. Query the session state before resuming after ambiguous failures.
-6. Persist the session URI in a later milestone so an application restart can resume it.
+6. Persist the session checkpoint so an application restart can resume it.
 
 Google requires non-final resumable chunks to use sizes that are multiples of 256 KiB. StorDown currently defaults to 8 MiB.
 
@@ -135,3 +135,36 @@ Authorization: Bearer <access token>
 Unlike blob downloads, Google Workspace export does **not** support HTTP Range. StorDown therefore deliberately uses a direct single-request transfer path for exports instead of performing a wasteful Range probe.
 
 The classic `files.export` endpoint currently has a 10 MB exported-content limit. Google Vids is also not handled by this path; it requires the newer long-running `files.download` flow and remains future work.
+
+
+## Persistent resumable-upload sessions
+
+StorDown now persists enough metadata for an interrupted Google Drive upload to continue after the application or Windows restarts.
+
+For every local file in a Drive upload batch, SQLite stores only non-secret resume metadata:
+
+- transfer ID and local source path;
+- parent folder ID;
+- remote name and MIME type;
+- total size and resumable chunk size;
+- last confirmed byte offset;
+- completed state;
+- a credential reference key.
+
+The resumable **session URI itself is not stored in SQLite**. It is stored in the Windows credential store under a per-file credential key because Google treats the resumable session URI as sensitive.
+
+Checkpoint flow:
+
+```text
+Google confirms chunk
+        |
+        +-> confirmed offset -> SQLite
+        |
+        +-> resumable session URI -> Windows Credential Manager
+```
+
+On restart, StorDown marks an in-flight upload as `interrupted`. After the Google account is restored, the queue exposes **Retomar upload**. StorDown loads the saved session URI from Windows Credential Manager, asks Google for the authoritative current offset, and continues from that byte.
+
+If the saved resumable session has expired or is no longer valid, StorDown creates a fresh resumable session for that file instead of failing the entire batch. Files already marked complete are skipped.
+
+Completed session credentials are removed from Windows Credential Manager. Removing transfer history also cleans up any remaining upload-session credentials.
