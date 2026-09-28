@@ -49,7 +49,7 @@
 - [x] Secure refresh-token storage using the Windows credential store
 - [x] Drive browser / destination picker
 - [x] Shared Drive browsing
-- [ ] Shared links / public Drive link import
+- [x] Shared links / public Drive link import
 - [x] Range-aware blob-file Drive downloads with Smart Multi-WAN
 - [x] Persist and resume Drive upload sessions after restart
 - [x] Google Workspace document export (Docs/Sheets/Slides/Drawings/Apps Script)
