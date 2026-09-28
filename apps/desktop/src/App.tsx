@@ -436,20 +436,34 @@ export default function App() {
   async function initializeDesktop() {
     try {
       const defaults = await invoke<DesktopDefaults>("get_desktop_defaults");
-      setDefaultDownloadDir(defaults.download_dir);
       setDetectedNics(defaults.interfaces);
 
       const detectedIps = defaults.interfaces.map((nic) => nic.ipv4);
-      if (detectedIps.length > 0) {
-        setBindIps(detectedIps.join(", "));
+      const savedIps = (window.localStorage.getItem("stordown.bindIps") ?? "")
+        .split(",")
+        .map((ip) => ip.trim())
+        .filter((ip) => detectedIps.includes(ip));
+      const selectedIps = savedIps.length > 0 ? savedIps : detectedIps;
+
+      if (selectedIps.length > 0) {
+        setBindIps(selectedIps.join(", "));
+      }
+
+      const savedDownloadDir = window.localStorage.getItem("stordown.downloadDir");
+      const downloadDir = savedDownloadDir?.trim() || defaults.download_dir;
+      setDefaultDownloadDir(downloadDir);
+
+      const savedConnections = Number(window.localStorage.getItem("stordown.connections") ?? "8");
+      if (Number.isFinite(savedConnections) && savedConnections >= 1 && savedConnections <= 64) {
+        setConnections(savedConnections);
       }
 
       if (!output) {
-        setOutput(joinWindowsPath(defaults.download_dir, "download.bin"));
+        setOutput(joinWindowsPath(downloadDir, "download.bin"));
       }
 
       if (!ruleDestination) {
-        setRuleDestination(defaults.download_dir);
+        setRuleDestination(downloadDir);
       }
 
       setStatus(
@@ -505,7 +519,9 @@ export default function App() {
       setRouteTests([]);
 
       if (nics.length > 0) {
-        setBindIps(nics.map((nic) => nic.ipv4).join(", "));
+        const detected = nics.map((nic) => nic.ipv4);
+        setBindIps(detected.join(", "));
+        window.localStorage.setItem("stordown.bindIps", detected.join(","));
         setStatus(`${nics.length} interface(s) física(s) detectada(s)`);
       } else {
         setStatus("Nenhuma interface física ativa com IPv4 foi encontrada");
@@ -515,6 +531,21 @@ export default function App() {
     } finally {
       setNetworkBusy(false);
     }
+  }
+
+  function toggleNetworkInterface(ip: string, enabled: boolean) {
+    const selected = new Set(links);
+
+    if (enabled) {
+      selected.add(ip);
+    } else {
+      selected.delete(ip);
+    }
+
+    const next = Array.from(selected);
+    setBindIps(next.join(", "));
+    setRouteTests([]);
+    window.localStorage.setItem("stordown.bindIps", next.join(","));
   }
 
   async function testRoutes() {
@@ -936,6 +967,8 @@ export default function App() {
           fileNameFromPath(output) ||
           suggestedDownloadName(downloadProbe?.final_url || url) ||
           "download.bin";
+        setDefaultDownloadDir(picked);
+        window.localStorage.setItem("stordown.downloadDir", picked);
         setOutput(joinWindowsPath(picked, name));
         setOutputManuallyEdited(false);
         setStatus(`Pasta de destino: ${picked}`);
@@ -1524,7 +1557,11 @@ export default function App() {
                   min={1}
                   max={64}
                   value={connections}
-                  onChange={(e) => setConnections(Number(e.target.value))}
+                  onChange={(e) => {
+                    const value = Number(e.target.value);
+                    setConnections(value);
+                    window.localStorage.setItem("stordown.connections", String(value));
+                  }}
                 />
               </label>
 
