@@ -300,11 +300,15 @@ export default function App() {
   }
 
   useEffect(() => {
+    initializeDesktop();
     reloadTransfers();
     reloadDownloadRules();
 
     let stopProgress: undefined | (() => void);
     let stopList: undefined | (() => void);
+    const refreshTimer = window.setInterval(() => {
+      reloadTransfers();
+    }, 1500);
 
     listen<TransferProgress>("transfer-progress", ({ payload }) => {
       const progressKey = `${payload.transfer_id}:${payload.item}`;
@@ -331,12 +335,77 @@ export default function App() {
       currentWindow.bytes += payload.bytes_delta;
       const elapsed = now - currentWindow.startedAt;
 
-      if (elapsed >= 750 || payload.completed) {
+      if (elapsed >= 500 || payload.completed) {
         const bytesPerSecond = elapsed > 0 ? (currentWindow.bytes * 1000) / elapsed : 0;
         setLinkSpeeds((current) => ({ ...current, [key]: bytesPerSecond }));
         speedWindows.current[key] = { startedAt: now, bytes: 0 };
       } else {
         speedWindows.current[key] = currentWindow;
+      }
+
+      const transferKey = payload.transfer_id;
+      const transferWindow = transferSpeedWindows.current[transferKey] ?? {
+        startedAt: now,
+        bytes: 0,
+      };
+      transferWindow.bytes += payload.bytes_delta;
+      const transferElapsed = now - transferWindow.startedAt;
+
+      setLiveTransferStats((current) => {
+        const previous = current[transferKey];
+        const baseBytes = previous?.bytesTransferred ?? 0;
+        const nextBytes = Math.max(
+          baseBytes + payload.bytes_delta,
+          payload.direction === "download" ? payload.bytes_transferred : baseBytes + payload.bytes_delta,
+        );
+
+        return {
+          ...current,
+          [transferKey]: {
+            speed: previous?.speed ?? 0,
+            bytesTransferred: nextBytes,
+            totalBytes: payload.total_bytes ?? previous?.totalBytes ?? null,
+            updatedAt: now,
+          },
+        };
+      });
+
+      if (transferElapsed >= 500 || payload.completed) {
+        const speed = transferElapsed > 0 ? (transferWindow.bytes * 1000) / transferElapsed : 0;
+        setLiveTransferStats((current) => ({
+          ...current,
+          [transferKey]: {
+            speed: payload.completed ? 0 : speed,
+            bytesTransferred:
+              current[transferKey]?.bytesTransferred ?? payload.bytes_transferred,
+            totalBytes: payload.total_bytes ?? current[transferKey]?.totalBytes ?? null,
+            updatedAt: now,
+          },
+        }));
+        transferSpeedWindows.current[transferKey] = { startedAt: now, bytes: 0 };
+      } else {
+        transferSpeedWindows.current[transferKey] = transferWindow;
+      }
+
+      setRecords((current) =>
+        current.map((record) =>
+          record.id === payload.transfer_id
+            ? {
+                ...record,
+                status: payload.completed ? "completed" : record.status === "paused" ? "paused" : "running",
+                bytes_transferred:
+                  payload.direction === "download"
+                    ? Math.max(record.bytes_transferred, payload.bytes_transferred)
+                    : record.bytes_transferred,
+                total_bytes: payload.total_bytes ?? record.total_bytes,
+                updated_at: Math.floor(now / 1000),
+              }
+            : record,
+        ),
+      );
+
+      if (payload.completed) {
+        reloadTransfers();
       }
     }).then((unlisten) => {
       stopProgress = unlisten;
@@ -349,10 +418,73 @@ export default function App() {
     });
 
     return () => {
+      window.clearInterval(refreshTimer);
       stopProgress?.();
       stopList?.();
     };
   }, []);
+
+  async function initializeDesktop() {
+    try {
+      const defaults = await invoke<DesktopDefaults>("get_desktop_defaults");
+      setDefaultDownloadDir(defaults.download_dir);
+      setDetectedNics(defaults.interfaces);
+
+      const detectedIps = defaults.interfaces.map((nic) => nic.ipv4);
+      if (detectedIps.length > 0) {
+        setBindIps(detectedIps.join(", "));
+      }
+
+      if (!output) {
+        setOutput(joinWindowsPath(defaults.download_dir, "download.bin"));
+      }
+
+      if (!ruleDestination) {
+        setRuleDestination(defaults.download_dir);
+      }
+
+      setStatus(
+        detectedIps.length > 1
+          ? `${detectedIps.length} interfaces detectadas — teste as WANs para confirmar saídas independentes`
+          : detectedIps.length === 1
+            ? "1 interface detectada — StorDown funcionará normalmente em modo single-link"
+            : "Nenhuma interface física foi detectada automaticamente",
+      );
+    } catch (error) {
+      setStatus(`Falha ao inicializar este computador: ${String(error)}`);
+    }
+  }
+
+  async function inspectDownloadUrl() {
+    if (!/^https?:\/\//i.test(url.trim())) {
+      setDownloadProbe(null);
+      return;
+    }
+
+    setInspectingUrl(true);
+
+    try {
+      const probe = await invoke<DownloadProbe>("inspect_download_url", { url: url.trim() });
+      setDownloadProbe(probe);
+
+      const name = probe.suggested_name || suggestedDownloadName(probe.final_url || url);
+      if (!outputManuallyEdited && name) {
+        const directory = parentDirectory(output) || defaultDownloadDir;
+        if (directory) {
+          setOutput(joinWindowsPath(directory, name));
+        }
+      }
+
+      setStatus(
+        `URL analisada: ${probe.size ? formatBytes(probe.size) : "tamanho desconhecido"} • ${probe.accepts_ranges ? "segmentação disponível" : "download direto"}`,
+      );
+    } catch (error) {
+      setDownloadProbe(null);
+      setStatus(`Não foi possível analisar a URL: ${String(error)}`);
+    } finally {
+      setInspectingUrl(false);
+    }
+  }
 
   async function detectNetworks() {
     setNetworkBusy(true);
