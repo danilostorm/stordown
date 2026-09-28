@@ -79,6 +79,7 @@ pub struct GoogleDriveItem {
     pub mime_type: String,
     pub size: Option<u64>,
     pub drive_id: Option<String>,
+    pub resource_key: Option<String>,
     pub can_download: bool,
     pub md5_checksum: Option<String>,
     pub is_folder: bool,
@@ -110,6 +111,8 @@ struct GoogleDriveItemResponse {
     size: Option<String>,
     #[serde(rename = "driveId")]
     drive_id: Option<String>,
+    #[serde(rename = "resourceKey")]
+    resource_key: Option<String>,
     #[serde(default)]
     capabilities: GoogleDriveCapabilities,
     #[serde(rename = "md5Checksum")]
@@ -227,7 +230,7 @@ pub async fn list_google_drive_items(
                 ("pageSize", "1000"),
                 (
                     "fields",
-                    "nextPageToken,files(id,name,mimeType,size,driveId,md5Checksum,capabilities(canDownload))",
+                    "nextPageToken,files(id,name,mimeType,size,driveId,resourceKey,md5Checksum,capabilities(canDownload))",
                 ),
                 ("orderBy", "folder,name_natural"),
             ]);
@@ -254,23 +257,11 @@ pub async fn list_google_drive_items(
         }
 
         let page: GoogleDriveItemListResponse = response.json().await?;
-        items.extend(page.files.into_iter().map(|item| {
-            let is_folder = item.mime_type == DRIVE_FOLDER_MIME;
-            let is_google_workspace =
-                item.mime_type.starts_with("application/vnd.google-apps.") && !is_folder;
-
-            GoogleDriveItem {
-                id: item.id,
-                name: item.name,
-                mime_type: item.mime_type,
-                size: item.size.and_then(|value| value.parse::<u64>().ok()),
-                drive_id: item.drive_id,
-                can_download: item.capabilities.can_download,
-                md5_checksum: item.md5_checksum,
-                is_folder,
-                is_google_workspace,
-            }
-        }));
+        items.extend(
+            page.files
+                .into_iter()
+                .map(|item| to_drive_item(item, None)),
+        );
 
         page_token = page.next_page_token;
         if page_token.is_none() {
@@ -279,6 +270,123 @@ pub async fn list_google_drive_items(
     }
 
     Ok(items)
+}
+
+pub async fn resolve_google_drive_shared_link(
+    access_token: &str,
+    shared_link: &str,
+) -> Result<GoogleDriveItem> {
+    let (file_id, resource_key) = parse_google_drive_shared_link(shared_link)?;
+    let client = Client::new();
+    let endpoint = format!("{DRIVE_FILES_URL}/{file_id}");
+
+    let mut request = client
+        .get(endpoint)
+        .bearer_auth(access_token)
+        .query(&[
+            ("supportsAllDrives", "true"),
+            (
+                "fields",
+                "id,name,mimeType,size,driveId,resourceKey,md5Checksum,capabilities(canDownload)",
+            ),
+        ]);
+
+    if let Some(resource_key) = resource_key.as_deref() {
+        request = request.header(
+            "X-Goog-Drive-Resource-Keys",
+            format!("{file_id}/{resource_key}"),
+        );
+    }
+
+    let response = request
+        .send()
+        .await
+        .context("failed to resolve Google Drive shared link")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!("Google Drive shared link lookup failed ({status}): {body}");
+    }
+
+    let item: GoogleDriveItemResponse = response.json().await?;
+    Ok(to_drive_item(item, resource_key))
+}
+
+pub fn parse_google_drive_shared_link(shared_link: &str) -> Result<(String, Option<String>)> {
+    let trimmed = shared_link.trim();
+
+    if !trimmed.contains("://")
+        && !trimmed.contains('/')
+        && !trimmed.contains('?')
+        && trimmed.len() >= 10
+    {
+        return Ok((trimmed.to_string(), None));
+    }
+
+    let url = Url::parse(trimmed).context("invalid Google Drive shared link")?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+
+    if !(host == "drive.google.com"
+        || host == "docs.google.com"
+        || host == "sheets.google.com"
+        || host == "slides.google.com")
+    {
+        bail!("link is not a recognized Google Drive/Workspace URL");
+    }
+
+    let resource_key = url
+        .query_pairs()
+        .find(|(key, _)| key.eq_ignore_ascii_case("resourcekey"))
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.is_empty());
+
+    let query_id = url
+        .query_pairs()
+        .find(|(key, _)| key == "id")
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.is_empty());
+
+    if let Some(file_id) = query_id {
+        return Ok((file_id, resource_key));
+    }
+
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
+        .unwrap_or_default();
+
+    for marker in ["d", "folders"] {
+        if let Some(index) = segments.iter().position(|segment| *segment == marker) {
+            if let Some(file_id) = segments.get(index + 1).filter(|value| !value.is_empty()) {
+                return Ok(((*file_id).to_string(), resource_key));
+            }
+        }
+    }
+
+    bail!("could not extract a Google Drive file or folder ID from the link")
+}
+
+fn to_drive_item(
+    item: GoogleDriveItemResponse,
+    fallback_resource_key: Option<String>,
+) -> GoogleDriveItem {
+    let is_folder = item.mime_type == DRIVE_FOLDER_MIME;
+    let is_google_workspace =
+        item.mime_type.starts_with("application/vnd.google-apps.") && !is_folder;
+
+    GoogleDriveItem {
+        id: item.id,
+        name: item.name,
+        mime_type: item.mime_type,
+        size: item.size.and_then(|value| value.parse::<u64>().ok()),
+        drive_id: item.drive_id,
+        resource_key: item.resource_key.or(fallback_resource_key),
+        can_download: item.capabilities.can_download,
+        md5_checksum: item.md5_checksum,
+        is_folder,
+        is_google_workspace,
+    }
 }
 
 pub fn google_drive_media_url(file_id: &str) -> String {
@@ -1474,9 +1582,36 @@ fn backoff(attempt: usize) -> Duration {
 mod tests {
     use super::{
         escape_drive_query_literal, google_drive_export_formats, google_drive_export_url,
-        google_drive_media_url, next_offset_from_range, validate_chunk_size,
+        google_drive_media_url, next_offset_from_range, parse_google_drive_shared_link,
+        validate_chunk_size,
     };
     use reqwest::header::HeaderValue;
+
+    #[test]
+    fn parses_common_drive_shared_links_and_resource_keys() {
+        let (id, key) = parse_google_drive_shared_link(
+            "https://drive.google.com/file/d/ABC123/view?usp=sharing&resourcekey=RK999",
+        )
+        .unwrap();
+        assert_eq!(id, "ABC123");
+        assert_eq!(key.as_deref(), Some("RK999"));
+
+        let (id, _) = parse_google_drive_shared_link(
+            "https://docs.google.com/document/d/DOC777/edit",
+        )
+        .unwrap();
+        assert_eq!(id, "DOC777");
+
+        let (id, _) = parse_google_drive_shared_link(
+            "https://drive.google.com/drive/folders/FOLDER42?usp=sharing",
+        )
+        .unwrap();
+        assert_eq!(id, "FOLDER42");
+
+        let (id, _) =
+            parse_google_drive_shared_link("https://drive.google.com/open?id=OPEN88").unwrap();
+        assert_eq!(id, "OPEN88");
+    }
 
     #[test]
     fn workspace_export_formats_include_office_defaults() {
