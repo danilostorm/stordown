@@ -16,7 +16,8 @@ use stordown_core::{
     authorize_google_drive_desktop, download_direct_with_control, download_with_control,
     google_drive_export_formats, google_drive_export_url, google_drive_media_url,
     list_google_drive_folders, list_google_drive_items, list_google_shared_drives, probe_links,
-    refresh_google_access_token, upload_google_drive_batch_resumable_with_control,
+    refresh_google_access_token, resolve_google_drive_shared_link,
+    upload_google_drive_batch_resumable_with_control,
     upload_google_drive_batch_with_control, DownloadRequest, DriveUploadCheckpointCallback,
     GoogleDriveBatchUploadRequest, GoogleDriveExportFormat, GoogleDriveFolder, GoogleDriveItem,
     GoogleDriveUploadResumeState, GoogleSharedDrive, LinkConfig, LinkProbeStatus,
@@ -456,6 +457,17 @@ async fn browse_google_drive_items(
 }
 
 #[tauri::command]
+async fn resolve_drive_shared_link(
+    shared_link: String,
+    state: State<'_, GoogleAuthState>,
+) -> Result<GoogleDriveItem, String> {
+    let access_token = current_google_access_token(state.inner()).await?;
+    resolve_google_drive_shared_link(&access_token, &shared_link)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn list_google_drive_roots(
     state: State<'_, GoogleAuthState>,
 ) -> Result<Vec<GoogleSharedDrive>, String> {
@@ -777,6 +789,7 @@ async fn enqueue_drive_export(
     source_mime: String,
     export_mime: String,
     extension: String,
+    resource_key: Option<String>,
     output: String,
     bind_ips: Vec<String>,
     speed_limit_mbps: Option<u64>,
@@ -811,6 +824,12 @@ async fn enqueue_drive_export(
         "Authorization".to_string(),
         format!("Bearer {access_token}"),
     );
+    if let Some(resource_key) = resource_key.filter(|value| !value.trim().is_empty()) {
+        headers.insert(
+            "X-Goog-Drive-Resource-Keys".to_string(),
+            format!("{}/{}", file_id.trim(), resource_key.trim()),
+        );
+    }
 
     let name = file_name_from_path(&output, &format!("{file_name}{extension}"));
 
@@ -857,6 +876,7 @@ async fn enqueue_drive_download(
     file_id: String,
     file_name: String,
     mime_type: String,
+    resource_key: Option<String>,
     output: String,
     connections: usize,
     bind_ips: Vec<String>,
@@ -889,6 +909,12 @@ async fn enqueue_drive_download(
         "Authorization".to_string(),
         format!("Bearer {access_token}"),
     );
+    if let Some(resource_key) = resource_key.filter(|value| !value.trim().is_empty()) {
+        headers.insert(
+            "X-Goog-Drive-Resource-Keys".to_string(),
+            format!("{}/{}", file_id.trim(), resource_key.trim()),
+        );
+    }
 
     let record = store
         .insert(NewTransferRecord {
@@ -2058,6 +2084,7 @@ fn main() {
             google_drive_auth_status,
             browse_google_drive_folders,
             browse_google_drive_items,
+            resolve_drive_shared_link,
             google_drive_export_options,
             list_google_drive_roots,
             disconnect_google_drive
