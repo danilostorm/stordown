@@ -26,6 +26,22 @@ type GoogleAuthStatus = {
   expires_in_seconds?: number | null;
 };
 
+type GoogleDriveFolder = {
+  id: string;
+  name: string;
+  drive_id?: string | null;
+};
+
+type GoogleSharedDrive = {
+  id: string;
+  name: string;
+};
+
+type DriveBreadcrumb = {
+  id: string | null;
+  name: string;
+};
+
 type TransferProgress = {
   transfer_id: string;
   direction: "download" | "upload" | string;
@@ -106,6 +122,15 @@ export default function App() {
     "C:\\Uploads\\arquivo1.mkv\nC:\\Uploads\\arquivo2.mkv",
   );
   const [driveParentId, setDriveParentId] = useState("");
+  const [driveDestinationLabel, setDriveDestinationLabel] = useState("Meu Drive");
+  const [driveBrowserOpen, setDriveBrowserOpen] = useState(false);
+  const [driveBrowserBusy, setDriveBrowserBusy] = useState(false);
+  const [driveFolders, setDriveFolders] = useState<GoogleDriveFolder[]>([]);
+  const [sharedDrives, setSharedDrives] = useState<GoogleSharedDrive[]>([]);
+  const [activeDriveId, setActiveDriveId] = useState<string | null>(null);
+  const [driveBreadcrumbs, setDriveBreadcrumbs] = useState<DriveBreadcrumb[]>([
+    { id: null, name: "Meu Drive" },
+  ]);
   const [driveClientId, setDriveClientId] = useState("");
   const [driveAuth, setDriveAuth] = useState<GoogleAuthStatus>({ connected: false });
   const [authBusy, setAuthBusy] = useState(false);
@@ -366,6 +391,92 @@ export default function App() {
     } finally {
       setAuthBusy(false);
     }
+  }
+
+  async function loadDriveFolders(
+    parentId: string | null,
+    driveId: string | null,
+  ) {
+    setDriveBrowserBusy(true);
+
+    try {
+      const folders = await invoke<GoogleDriveFolder[]>("browse_google_drive_folders", {
+        parentId,
+        driveId,
+      });
+      setDriveFolders(folders);
+    } catch (error) {
+      const message = String(error);
+      setStatus(
+        message.includes("403") || message.toLowerCase().includes("scope")
+          ? "O Google Drive precisa de nova autorização para navegar pastas. Desconecte e conecte novamente."
+          : `Erro ao listar pastas do Google Drive: ${message}`,
+      );
+      setDriveFolders([]);
+    } finally {
+      setDriveBrowserBusy(false);
+    }
+  }
+
+  async function openDriveBrowser() {
+    if (!driveAuth.connected) {
+      setStatus("Conecte o Google Drive antes de escolher uma pasta");
+      return;
+    }
+
+    setDriveBrowserOpen(true);
+    setDriveBrowserBusy(true);
+
+    try {
+      const drives = await invoke<GoogleSharedDrive[]>("list_google_drive_roots");
+      setSharedDrives(drives);
+      setActiveDriveId(null);
+      setDriveBreadcrumbs([{ id: null, name: "Meu Drive" }]);
+      await loadDriveFolders(null, null);
+    } catch (error) {
+      const message = String(error);
+      setStatus(
+        message.includes("403") || message.toLowerCase().includes("scope")
+          ? "Reconecte o Google Drive para liberar o navegador de pastas."
+          : `Erro ao abrir Google Drive: ${message}`,
+      );
+      setDriveBrowserBusy(false);
+    }
+  }
+
+  async function switchDrive(drive: GoogleSharedDrive | null) {
+    const driveId = drive?.id ?? null;
+    setActiveDriveId(driveId);
+    setDriveBreadcrumbs([
+      { id: driveId, name: drive?.name ?? "Meu Drive" },
+    ]);
+    await loadDriveFolders(driveId, driveId);
+  }
+
+  async function enterDriveFolder(folder: GoogleDriveFolder) {
+    setDriveBreadcrumbs((current) => [
+      ...current,
+      { id: folder.id, name: folder.name },
+    ]);
+    await loadDriveFolders(folder.id, activeDriveId);
+  }
+
+  async function driveBrowserBack() {
+    if (driveBreadcrumbs.length <= 1) return;
+
+    const next = driveBreadcrumbs.slice(0, -1);
+    const parent = next[next.length - 1];
+    setDriveBreadcrumbs(next);
+    await loadDriveFolders(parent.id, activeDriveId);
+  }
+
+  function selectCurrentDriveFolder() {
+    const current = driveBreadcrumbs[driveBreadcrumbs.length - 1];
+    const parentId = current.id ?? "";
+    setDriveParentId(parentId);
+    setDriveDestinationLabel(driveBreadcrumbs.map((item) => item.name).join(" / "));
+    setDriveBrowserOpen(false);
+    setStatus(`Destino do Google Drive: ${driveBreadcrumbs.map((item) => item.name).join(" / ")}`);
   }
 
   async function chooseDownloadDestination() {
@@ -865,14 +976,95 @@ export default function App() {
               </label>
 
               <label>
-                Pasta de destino (ID opcional)
-                <input
-                  value={driveParentId}
-                  onChange={(e) => setDriveParentId(e.target.value)}
-                  placeholder="ID da pasta no Google Drive"
-                />
+                Pasta de destino
+                <div className="driveDestinationField">
+                  <div>
+                    <strong>{driveDestinationLabel}</strong>
+                    <small>{driveParentId ? `ID: ${driveParentId}` : "Raiz do Meu Drive"}</small>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={openDriveBrowser}
+                    disabled={!driveAuth.connected}
+                  >
+                    Escolher pasta…
+                  </button>
+                </div>
               </label>
             </div>
+
+            {driveBrowserOpen && (
+              <section className="driveBrowser">
+                <div className="driveBrowserHeader">
+                  <div>
+                    <span>DESTINO GOOGLE DRIVE</span>
+                    <strong>{driveBreadcrumbs.map((item) => item.name).join(" / ")}</strong>
+                  </div>
+                  <button type="button" onClick={() => setDriveBrowserOpen(false)}>
+                    Fechar
+                  </button>
+                </div>
+
+                <div className="driveRootTabs">
+                  <button
+                    type="button"
+                    className={activeDriveId === null ? "active" : ""}
+                    onClick={() => switchDrive(null)}
+                  >
+                    Meu Drive
+                  </button>
+                  {sharedDrives.map((drive) => (
+                    <button
+                      type="button"
+                      key={drive.id}
+                      className={activeDriveId === drive.id ? "active" : ""}
+                      onClick={() => switchDrive(drive)}
+                    >
+                      {drive.name}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="driveBrowserToolbar">
+                  <button
+                    type="button"
+                    onClick={driveBrowserBack}
+                    disabled={driveBreadcrumbs.length <= 1 || driveBrowserBusy}
+                  >
+                    ← Voltar
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={selectCurrentDriveFolder}
+                    disabled={driveBrowserBusy}
+                  >
+                    Usar esta pasta
+                  </button>
+                </div>
+
+                <div className="driveFolderList">
+                  {driveBrowserBusy ? (
+                    <div className="driveBrowserEmpty">Carregando pastas…</div>
+                  ) : driveFolders.length === 0 ? (
+                    <div className="driveBrowserEmpty">Nenhuma subpasta aqui.</div>
+                  ) : (
+                    driveFolders.map((folder) => (
+                      <button
+                        type="button"
+                        className="driveFolderRow"
+                        key={folder.id}
+                        onClick={() => enterDriveFolder(folder)}
+                      >
+                        <span>📁</span>
+                        <strong>{folder.name}</strong>
+                        <small>Abrir →</small>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </section>
+            )}
 
             <div className="driveAuthCard">
               <div>
