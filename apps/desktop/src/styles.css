@@ -1784,3 +1784,47 @@ input:focus, textarea:focus, select:focus {
     white-space: nowrap;
   }
 }
+
+
+.downloadDestinationGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(240px, .8fr);
+  gap: 14px;
+}
+
+.portableSettings {
+  grid-column: 1 / -1;
+}
+
+.portableSummary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.portableSummary span {
+  display: grid;
+  gap: 3px;
+  padding: 11px 12px;
+  border: 1px solid #263652;
+  border-radius: 10px;
+  background: #0f1828;
+  color: #8597b7;
+  font-size: 10px;
+}
+
+.portableSummary strong {
+  color: #f4f7ff;
+  font-size: 15px;
+}
+
+.extensionIdentity code {
+  user-select: all;
+}
+
+@media (max-width: 980px) {
+  .downloadDestinationGrid,
+  .portableSummary {
+    grid-template-columns: 1fr;
+  }
+}
