@@ -2485,6 +2485,87 @@ function RoutePreview({
   );
 }
 
+function ActiveTransferDock({
+  records,
+  liveStats,
+  selectedId,
+  onSelect,
+  onPause,
+  onResume,
+  onCancel,
+}: {
+  records: TransferRecord[];
+  liveStats: Record<string, LiveTransferStats>;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onPause: (id: string) => void;
+  onResume: (id: string) => void;
+  onCancel: (id: string) => void;
+}) {
+  if (records.length === 0) return null;
+
+  const record =
+    records.find((item) => item.id === selectedId) ??
+    records.find((item) => item.status === "running") ??
+    records[0];
+
+  const live = liveStats[record.id];
+  const transferred = Math.max(record.bytes_transferred, live?.bytesTransferred ?? 0);
+  const total = live?.totalBytes ?? record.total_bytes ?? null;
+  const percent = total && total > 0 ? Math.min(100, (transferred / total) * 100) : 0;
+  const speed = record.status === "running" ? live?.speed ?? 0 : 0;
+  const eta =
+    total && speed > 0 && transferred < total ? (total - transferred) / speed : null;
+
+  return (
+    <section className="activeTransferDock">
+      <button className="dockMain" type="button" onClick={() => onSelect(record.id)}>
+        <div className="dockIcon">{record.direction === "upload" ? "↑" : "↓"}</div>
+        <div className="dockBody">
+          <div className="dockTitle">
+            <strong title={record.name}>{record.name}</strong>
+            <span>{percent > 0 ? `${percent.toFixed(1)}%` : statusShortLabel(record.status)}</span>
+          </div>
+          <div className="dockTrack">
+            <div className="dockFill" style={{ width: `${percent}%` }} />
+          </div>
+          <div className="dockMeta">
+            <span>{formatBytes(transferred)}{total ? ` / ${formatBytes(total)}` : ""}</span>
+            <span>{formatSpeed(speed)}</span>
+            {eta !== null && <span>ETA {formatDuration(eta)}</span>}
+            <span>{record.bind_ips.length || 1} link(s)</span>
+          </div>
+        </div>
+      </button>
+
+      <div className="dockActions">
+        {record.status === "running" && (
+          <button type="button" onClick={() => onPause(record.id)}>Ⅱ</button>
+        )}
+        {(record.status === "paused" || record.status === "interrupted") && (
+          <button type="button" onClick={() => onResume(record.id)}>▶</button>
+        )}
+        {activeStatuses.has(record.status) && (
+          <button type="button" className="dangerButton" onClick={() => onCancel(record.id)}>×</button>
+        )}
+      </div>
+
+      {records.length > 1 && <span className="dockQueueCount">+{records.length - 1} na fila</span>}
+    </section>
+  );
+}
+
+function statusShortLabel(status: string) {
+  const labels: Record<string, string> = {
+    queued: "Na fila",
+    running: "Transferindo",
+    paused: "Pausado",
+    scheduled: "Agendado",
+    interrupted: "Interrompido",
+  };
+  return labels[status] ?? status;
+}
+
 function TransferList({
   records,
   emptyText,
