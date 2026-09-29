@@ -107,6 +107,7 @@ type DownloadRule = {
 };
 
 type BrowserIntegrationResult = {
+  extension_id: string;
   manifest_path: string;
   native_host_path: string;
   chrome_registered: boolean;
@@ -120,6 +121,12 @@ type BrowserExtensionPrepared = {
 type DesktopDefaults = {
   download_dir: string;
   interfaces: NetworkInterfaceInfo[];
+};
+
+type RuntimePreferences = {
+  download_dir: string;
+  selected_ips: string[];
+  connections: number;
 };
 
 type DownloadProbe = {
@@ -142,7 +149,7 @@ type SpeedWindow = {
   bytes: number;
 };
 
-type View = "home" | "download" | "upload" | "cloud" | "queue" | "scheduled" | "finished" | "settings";
+type View = "home" | "download" | "upload" | "cloud" | "queue" | "scheduled" | "finished" | "extension" | "settings";
 
 const activeStatuses = new Set(["scheduled", "queued", "running", "paused", "interrupted"]);
 const finishedStatuses = new Set(["completed", "failed", "cancelled"]);
@@ -206,7 +213,7 @@ export default function App() {
   const [ruleDestination, setRuleDestination] = useState("");
   const [ruleEnabled, setRuleEnabled] = useState(true);
   const [rulePriority, setRulePriority] = useState(100);
-  const [browserExtensionId, setBrowserExtensionId] = useState("");
+  const [browserExtensionId, setBrowserExtensionId] = useState("oiiogiiplcdekpofikkajmmgkjcpgojj");
   const [browserInstallBusy, setBrowserInstallBusy] = useState(false);
   const [browserIntegration, setBrowserIntegration] = useState<BrowserIntegrationResult | null>(null);
   const [browserExtensionPrepared, setBrowserExtensionPrepared] = useState<BrowserExtensionPrepared | null>(null);
@@ -438,6 +445,24 @@ export default function App() {
     };
   }, []);
 
+  async function syncRuntimePreferences(
+    downloadDir: string,
+    selectedIps: string[],
+    connectionCount: number,
+  ) {
+    if (!downloadDir.trim()) return;
+
+    try {
+      await invoke<RuntimePreferences>("update_runtime_preferences", {
+        downloadDir,
+        selectedIps,
+        connections: Math.min(64, Math.max(1, connectionCount || 1)),
+      });
+    } catch (error) {
+      console.warn("Não foi possível sincronizar preferências do Native Host:", error);
+    }
+  }
+
   async function initializeDesktop() {
     try {
       const defaults = await invoke<DesktopDefaults>("get_desktop_defaults");
@@ -459,9 +484,13 @@ export default function App() {
       setDefaultDownloadDir(downloadDir);
 
       const savedConnections = Number(window.localStorage.getItem("stordown.connections") ?? "8");
-      if (Number.isFinite(savedConnections) && savedConnections >= 1 && savedConnections <= 64) {
-        setConnections(savedConnections);
-      }
+      const connectionCount =
+        Number.isFinite(savedConnections) && savedConnections >= 1 && savedConnections <= 64
+          ? savedConnections
+          : 8;
+      setConnections(connectionCount);
+
+      await syncRuntimePreferences(downloadDir, selectedIps, connectionCount);
 
       if (!output) {
         setOutput(joinWindowsPath(downloadDir, "download.bin"));
@@ -527,6 +556,7 @@ export default function App() {
         const detected = nics.map((nic) => nic.ipv4);
         setBindIps(detected.join(", "));
         window.localStorage.setItem("stordown.bindIps", detected.join(","));
+        await syncRuntimePreferences(defaultDownloadDir, detected, connections);
         setStatus(`${nics.length} interface(s) física(s) detectada(s)`);
       } else {
         setStatus("Nenhuma interface física ativa com IPv4 foi encontrada");
@@ -538,7 +568,7 @@ export default function App() {
     }
   }
 
-  function toggleNetworkInterface(ip: string, enabled: boolean) {
+  async function toggleNetworkInterface(ip: string, enabled: boolean) {
     const selected = new Set(links);
 
     if (enabled) {
@@ -551,6 +581,7 @@ export default function App() {
     setBindIps(next.join(", "));
     setRouteTests([]);
     window.localStorage.setItem("stordown.bindIps", next.join(","));
+    await syncRuntimePreferences(defaultDownloadDir, next, connections);
   }
 
   async function testRoutes() {
@@ -975,6 +1006,7 @@ export default function App() {
             "download.bin";
         setDefaultDownloadDir(picked);
         window.localStorage.setItem("stordown.downloadDir", picked);
+        await syncRuntimePreferences(picked, links, connections);
         setOutput(joinWindowsPath(picked, name));
         setOutputManuallyEdited(false);
         setStatus(`Pasta de destino: ${picked}`);
@@ -1129,12 +1161,21 @@ export default function App() {
 
   async function prepareBrowserExtension() {
     setBrowserInstallBusy(true);
-    setStatus("Preparando extensão Chrome/Edge incluída no StorDown…");
+    setStatus("Preparando extensão e Native Host do StorDown…");
 
     try {
-      const result = await invoke<BrowserExtensionPrepared>("prepare_browser_extension");
-      setBrowserExtensionPrepared(result);
-      setStatus("Extensão extraída. Ative o modo desenvolvedor e use 'Carregar sem compactação'.");
+      const prepared = await invoke<BrowserExtensionPrepared>("prepare_browser_extension");
+      setBrowserExtensionPrepared(prepared);
+
+      const integration = await invoke<BrowserIntegrationResult>("install_browser_integration", {
+        extensionId: null,
+      });
+      setBrowserIntegration(integration);
+      setBrowserExtensionId(integration.extension_id);
+
+      setStatus(
+        "Extensão preparada e Native Host registrado. Agora carregue a pasta no Chrome/Edge uma única vez.",
+      );
     } catch (error) {
       setStatus(`Erro ao preparar extensão: ${String(error)}`);
     } finally {
@@ -1144,14 +1185,15 @@ export default function App() {
 
   async function installBrowserIntegration() {
     setBrowserInstallBusy(true);
-    setStatus("Instalando integração Chrome/Edge…");
+    setStatus("Registrando novamente a integração Chrome/Edge…");
 
     try {
       const result = await invoke<BrowserIntegrationResult>("install_browser_integration", {
-        extensionId: browserExtensionId,
+        extensionId: browserExtensionId || null,
       });
       setBrowserIntegration(result);
-      setStatus("Integração do navegador instalada");
+      setBrowserExtensionId(result.extension_id);
+      setStatus("Integração do navegador registrada neste Windows");
     } catch (error) {
       setStatus(`Erro ao instalar integração: ${String(error)}`);
     } finally {
@@ -1288,6 +1330,12 @@ export default function App() {
             <span className="navIcon">☁</span> Google Drive
           </button>
           <button
+            className={`navItem ${view === "extension" ? "active" : ""}`}
+            onClick={() => setView("extension")}
+          >
+            <span className="navIcon">⊕</span> Extensão
+          </button>
+          <button
             className={`navItem ${view === "settings" ? "active" : ""}`}
             onClick={() => setView("settings")}
           >
@@ -1359,12 +1407,44 @@ export default function App() {
       <section className="content">
         <header>
           <div>
-            <p className="eyebrow">STORDOWN 0.1 ALPHA</p>
+            <p className="eyebrow">STORDOWN 0.1 ALPHA.3</p>
             <h1>{viewTitle(view)}</h1>
             <p className="subtitle">{viewSubtitle(view)}</p>
           </div>
           <div className="statusPill">{status}</div>
         </header>
+
+        <div className="managerToolbar">
+          <button type="button" className={view === "download" ? "active" : ""} onClick={() => setView("download")}>
+            <span>＋</span> Download
+          </button>
+          <button type="button" className={view === "upload" ? "active" : ""} onClick={() => setView("upload")}>
+            <span>↑</span> Upload
+          </button>
+          <button type="button" className={view === "queue" ? "active" : ""} onClick={() => setView("queue")}>
+            <span>≡</span> Transferências
+          </button>
+          <button type="button" className={view === "extension" ? "active" : ""} onClick={() => setView("extension")}>
+            <span>⊕</span> Navegador
+          </button>
+          <div className="toolbarSummary">
+            <strong>{formatSpeed(aggregateLiveSpeed)}</strong>
+            <span>{records.filter((record) => record.status === "running").length} ativa(s)</span>
+          </div>
+        </div>
+
+        <ActiveTransferDock
+          records={queuedRecords}
+          liveStats={liveTransferStats}
+          selectedId={activeTransferId}
+          onSelect={(id) => {
+            setActiveTransferId(id);
+            setView("queue");
+          }}
+          onPause={pauseTransfer}
+          onResume={resumeTransfer}
+          onCancel={cancelTransfer}
+        />
 
         {view === "home" && (
           <section className="managerHome">
@@ -1390,7 +1470,7 @@ export default function App() {
                   <small>Navegar, baixar e exportar</small>
                 </div>
               </button>
-              <button type="button" className="actionTile" onClick={() => setView("settings")}>
+              <button type="button" className="actionTile" onClick={() => setView("extension")}>
                 <span>⊕</span>
                 <div>
                   <strong>Extensão</strong>
@@ -1503,26 +1583,39 @@ export default function App() {
               )}
             </label>
 
-            <label>
-              Arquivo de destino
-              <div className="fieldWithButton">
+            <div className="downloadDestinationGrid">
+              <label>
+                Pasta de destino
+                <div className="fieldWithButton">
+                  <input
+                    value={parentDirectory(output) || defaultDownloadDir}
+                    readOnly
+                    placeholder="Pasta Downloads deste Windows"
+                  />
+                  <button type="button" onClick={chooseDownloadDestination}>
+                    Escolher…
+                  </button>
+                </div>
+                <small className="fieldHint">A pasta fica salva apenas neste computador.</small>
+              </label>
+
+              <label>
+                Nome do arquivo
                 <input
-                  value={output}
-                  onChange={(e) => {
-                    setOutput(e.target.value);
+                  value={fileNameFromPath(output)}
+                  onChange={(event) => {
+                    const directory = parentDirectory(output) || defaultDownloadDir;
+                    setOutput(joinWindowsPath(directory, event.target.value));
                     setOutputManuallyEdited(true);
                   }}
-                  placeholder="Pasta Downloads deste Windows"
+                  placeholder="arquivo.iso"
                   required
                 />
-                <button type="button" onClick={chooseDownloadDestination}>
-                  Escolher pasta…
-                </button>
-              </div>
-              <small className="fieldHint">
-                O StorDown usa a pasta Downloads deste computador e tenta obter o nome real pelo servidor.
-              </small>
-            </label>
+                <small className="fieldHint">
+                  O nome vem do servidor quando disponível. Você pode editar antes de iniciar.
+                </small>
+              </label>
+            </div>
 
             <label>
               Agendar início — opcional
@@ -1581,6 +1674,7 @@ export default function App() {
                     const value = Number(e.target.value);
                     setConnections(value);
                     window.localStorage.setItem("stordown.connections", String(value));
+                    void syncRuntimePreferences(defaultDownloadDir, links, value);
                   }}
                 />
                 <small className="fieldHint">
@@ -2129,8 +2223,8 @@ export default function App() {
           </>
         )}
 
-        {view === "settings" && (
-          <section className="settingsGrid">
+        {view === "extension" && (
+          <section className="extensionWorkspace">
             <section className="downloadCard browserInstaller">
               <div className="notice">
                 <strong>Extensão Chrome / Edge incluída</strong>
@@ -2141,10 +2235,9 @@ export default function App() {
               </div>
 
               <div className="extensionSteps">
-                <span><b>1</b> Clique em <strong>Preparar extensão</strong>. A pasta será extraída e aberta.</span>
-                <span><b>2</b> Abra Chrome/Edge, ative o modo desenvolvedor e escolha <strong>Carregar sem compactação</strong>.</span>
-                <span><b>3</b> Selecione a pasta extraída, copie o ID de 32 caracteres e cole abaixo.</span>
-                <span><b>4</b> Clique em <strong>Conectar ao StorDown</strong>.</span>
+                <span><b>1</b> Clique em <strong>Preparar e conectar</strong>. O StorDown extrai a extensão e registra o Native Host automaticamente.</span>
+                <span><b>2</b> No Chrome/Edge, ative o modo desenvolvedor, escolha <strong>Carregar sem compactação</strong> e selecione a pasta aberta pelo StorDown.</span>
+                <span><b>3</b> Pronto. O ID da extensão é fixo e igual em qualquer computador; não precisa copiar nem configurar manualmente.</span>
               </div>
 
               <div className="browserInstallerActions">
@@ -2154,7 +2247,7 @@ export default function App() {
                   onClick={prepareBrowserExtension}
                   disabled={browserInstallBusy}
                 >
-                  {browserInstallBusy ? "Preparando…" : "Preparar extensão"}
+                  {browserInstallBusy ? "Preparando…" : "Preparar e conectar"}
                 </button>
                 <button type="button" onClick={() => openExtensionsPage("chrome")}>
                   Chrome
@@ -2171,36 +2264,79 @@ export default function App() {
                 </div>
               )}
 
-              <label>
-                ID da extensão
-                <input
-                  value={browserExtensionId}
-                  onChange={(event) => setBrowserExtensionId(event.target.value.trim().toLowerCase())}
-                  placeholder="Cole o ID exibido pelo Chrome ou Edge"
-                  maxLength={32}
-                />
-              </label>
+              <div className="browserInstallResult extensionIdentity">
+                <strong>ID fixo da extensão</strong>
+                <code>{browserExtensionId}</code>
+                <span>Esse mesmo ID é usado no Chrome e Edge em qualquer PC.</span>
+              </div>
 
               <div className="browserInstallerActions">
                 <button
                   type="button"
-                  className="primary"
                   onClick={installBrowserIntegration}
-                  disabled={browserInstallBusy || browserExtensionId.length !== 32}
+                  disabled={browserInstallBusy}
                 >
-                  {browserInstallBusy ? "Conectando…" : "Conectar ao StorDown"}
+                  Registrar novamente
                 </button>
               </div>
 
               {browserIntegration && (
                 <div className="browserInstallResult">
                   <strong>Extensão conectada ao aplicativo</strong>
+                  <span>ID: {browserIntegration.extension_id}</span>
                   <span>Chrome: {browserIntegration.chrome_registered ? "registrado" : "não registrado"}</span>
                   <span>Edge: {browserIntegration.edge_registered ? "registrado" : "não registrado"}</span>
                   <code>{browserIntegration.native_host_path}</code>
                 </div>
               )}
             </section>
+
+            <section className="extensionHelp">
+              <div>
+                <strong>Integração do navegador</strong>
+                <span>
+                  Depois de conectar, o botão direito ganha “Baixar com StorDown” e a captura
+                  automática pode substituir o download do Chrome/Edge.
+                </span>
+              </div>
+              <div className="extensionFeatureGrid">
+                <span>✓ captura de links</span>
+                <span>✓ downloads autenticados por site</span>
+                <span>✓ cookies somente com sua autorização</span>
+                <span>✓ lote de links da página</span>
+                <span>✓ fila e progresso no desktop</span>
+                <span>✓ usa as mesmas interfaces escolhidas no StorDown</span>
+              </div>
+            </section>
+          </section>
+        )}
+
+        {view === "settings" && (
+          <section className="settingsGrid">
+            <section className="downloadCard portableSettings">
+              <div className="notice">
+                <strong>Configuração deste computador</strong>
+                <span>
+                  Nada aqui depende do seu PC de desenvolvimento ou da sua rede. Cada instalação
+                  detecta as próprias interfaces e usa a pasta Downloads do usuário por padrão.
+                </span>
+              </div>
+
+              <label>
+                Pasta padrão de downloads
+                <div className="fieldWithButton">
+                  <input value={defaultDownloadDir} readOnly />
+                  <button type="button" onClick={chooseDownloadDestination}>Alterar…</button>
+                </div>
+              </label>
+
+              <div className="portableSummary">
+                <span><strong>{detectedNics.length}</strong> interface(s) física(s) detectada(s)</span>
+                <span><strong>{links.length}</strong> selecionada(s) para transferências</span>
+                <span><strong>{connections}</strong> conexão(ões) por arquivo</span>
+              </div>
+            </section>
+
             <form className="downloadCard ruleEditor" onSubmit={saveRule}>
               <div className="notice">
                 <strong>Categorias automáticas de download</strong>
@@ -2336,23 +2472,26 @@ export default function App() {
           />
         )}
 
-        <section className="metrics">
-          <article>
-            <span>Fila</span>
-            <strong>{queuedRecords.length}</strong>
-            <small>download + upload unificados</small>
-          </article>
-          <article>
-            <span>Execução</span>
-            <strong>2 simultâneas</strong>
-            <small>com Multi-WAN e telemetria</small>
-          </article>
-          <article>
-            <span>Histórico</span>
-            <strong>{finishedRecords.length}</strong>
-            <small>persistente em SQLite</small>
-          </article>
-        </section>
+        {view === "home" && (
+          <section className="metrics">
+            <article>
+              <span>Fila</span>
+              <strong>{queuedRecords.length}</strong>
+              <small>download + upload unificados</small>
+            </article>
+            <article>
+              <span>Execução</span>
+              <strong>2 simultâneas</strong>
+              <small>com Multi-WAN e telemetria</small>
+            </article>
+            <article>
+              <span>Histórico</span>
+              <strong>{finishedRecords.length}</strong>
+              <small>persistente em SQLite</small>
+            </article>
+          </section>
+        )}
+
       </section>
     </main>
   );
@@ -2387,6 +2526,87 @@ function RoutePreview({
       })}
     </div>
   );
+}
+
+function ActiveTransferDock({
+  records,
+  liveStats,
+  selectedId,
+  onSelect,
+  onPause,
+  onResume,
+  onCancel,
+}: {
+  records: TransferRecord[];
+  liveStats: Record<string, LiveTransferStats>;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onPause: (id: string) => void;
+  onResume: (id: string) => void;
+  onCancel: (id: string) => void;
+}) {
+  if (records.length === 0) return null;
+
+  const record =
+    records.find((item) => item.id === selectedId) ??
+    records.find((item) => item.status === "running") ??
+    records[0];
+
+  const live = liveStats[record.id];
+  const transferred = Math.max(record.bytes_transferred, live?.bytesTransferred ?? 0);
+  const total = live?.totalBytes ?? record.total_bytes ?? null;
+  const percent = total && total > 0 ? Math.min(100, (transferred / total) * 100) : 0;
+  const speed = record.status === "running" ? live?.speed ?? 0 : 0;
+  const eta =
+    total && speed > 0 && transferred < total ? (total - transferred) / speed : null;
+
+  return (
+    <section className="activeTransferDock">
+      <button className="dockMain" type="button" onClick={() => onSelect(record.id)}>
+        <div className="dockIcon">{record.direction === "upload" ? "↑" : "↓"}</div>
+        <div className="dockBody">
+          <div className="dockTitle">
+            <strong title={record.name}>{record.name}</strong>
+            <span>{percent > 0 ? `${percent.toFixed(1)}%` : statusShortLabel(record.status)}</span>
+          </div>
+          <div className="dockTrack">
+            <div className="dockFill" style={{ width: `${percent}%` }} />
+          </div>
+          <div className="dockMeta">
+            <span>{formatBytes(transferred)}{total ? ` / ${formatBytes(total)}` : ""}</span>
+            <span>{formatSpeed(speed)}</span>
+            {eta !== null && <span>ETA {formatDuration(eta)}</span>}
+            <span>{record.bind_ips.length || 1} link(s)</span>
+          </div>
+        </div>
+      </button>
+
+      <div className="dockActions">
+        {record.status === "running" && (
+          <button type="button" onClick={() => onPause(record.id)}>Ⅱ</button>
+        )}
+        {(record.status === "paused" || record.status === "interrupted") && (
+          <button type="button" onClick={() => onResume(record.id)}>▶</button>
+        )}
+        {activeStatuses.has(record.status) && (
+          <button type="button" className="dangerButton" onClick={() => onCancel(record.id)}>×</button>
+        )}
+      </div>
+
+      {records.length > 1 && <span className="dockQueueCount">+{records.length - 1} na fila</span>}
+    </section>
+  );
+}
+
+function statusShortLabel(status: string) {
+  const labels: Record<string, string> = {
+    queued: "Na fila",
+    running: "Transferindo",
+    paused: "Pausado",
+    scheduled: "Agendado",
+    interrupted: "Interrompido",
+  };
+  return labels[status] ?? status;
 }
 
 function TransferList({
@@ -2632,6 +2852,7 @@ function viewTitle(view: View) {
   if (view === "cloud") return "Google Drive";
   if (view === "queue") return "Fila de transferências";
   if (view === "scheduled") return "Agendador";
+  if (view === "extension") return "Extensão do navegador";
   if (view === "settings") return "Configurações";
   return "Histórico";
 }
@@ -2655,8 +2876,11 @@ function viewSubtitle(view: View) {
   if (view === "scheduled") {
     return "Programe downloads HTTP/HTTPS para começar automaticamente mais tarde.";
   }
+  if (view === "extension") {
+    return "Instale e conecte a extensão Chrome/Edge que acompanha o StorDown.";
+  }
   if (view === "settings") {
-    return "Categorias e regras automáticas para organizar downloads capturados pelo navegador.";
+    return "Preferências e categorias automáticas para organizar downloads.";
   }
   return "Transferências concluídas, canceladas e com falha ficam salvas entre reinicializações.";
 }
