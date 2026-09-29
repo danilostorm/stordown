@@ -122,6 +122,12 @@ type DesktopDefaults = {
   interfaces: NetworkInterfaceInfo[];
 };
 
+type RuntimePreferences = {
+  download_dir: string;
+  selected_ips: string[];
+  connections: number;
+};
+
 type DownloadProbe = {
   size?: number | null;
   accepts_ranges: boolean;
@@ -142,7 +148,7 @@ type SpeedWindow = {
   bytes: number;
 };
 
-type View = "home" | "download" | "upload" | "cloud" | "queue" | "scheduled" | "finished" | "settings";
+type View = "home" | "download" | "upload" | "cloud" | "queue" | "scheduled" | "finished" | "extension" | "settings";
 
 const activeStatuses = new Set(["scheduled", "queued", "running", "paused", "interrupted"]);
 const finishedStatuses = new Set(["completed", "failed", "cancelled"]);
@@ -438,6 +444,24 @@ export default function App() {
     };
   }, []);
 
+  async function syncRuntimePreferences(
+    downloadDir: string,
+    selectedIps: string[],
+    connectionCount: number,
+  ) {
+    if (!downloadDir.trim()) return;
+
+    try {
+      await invoke<RuntimePreferences>("update_runtime_preferences", {
+        downloadDir,
+        selectedIps,
+        connections: Math.min(64, Math.max(1, connectionCount || 1)),
+      });
+    } catch (error) {
+      console.warn("Não foi possível sincronizar preferências do Native Host:", error);
+    }
+  }
+
   async function initializeDesktop() {
     try {
       const defaults = await invoke<DesktopDefaults>("get_desktop_defaults");
@@ -459,9 +483,13 @@ export default function App() {
       setDefaultDownloadDir(downloadDir);
 
       const savedConnections = Number(window.localStorage.getItem("stordown.connections") ?? "8");
-      if (Number.isFinite(savedConnections) && savedConnections >= 1 && savedConnections <= 64) {
-        setConnections(savedConnections);
-      }
+      const connectionCount =
+        Number.isFinite(savedConnections) && savedConnections >= 1 && savedConnections <= 64
+          ? savedConnections
+          : 8;
+      setConnections(connectionCount);
+
+      await syncRuntimePreferences(downloadDir, selectedIps, connectionCount);
 
       if (!output) {
         setOutput(joinWindowsPath(downloadDir, "download.bin"));
@@ -527,6 +555,7 @@ export default function App() {
         const detected = nics.map((nic) => nic.ipv4);
         setBindIps(detected.join(", "));
         window.localStorage.setItem("stordown.bindIps", detected.join(","));
+        await syncRuntimePreferences(defaultDownloadDir, detected, connections);
         setStatus(`${nics.length} interface(s) física(s) detectada(s)`);
       } else {
         setStatus("Nenhuma interface física ativa com IPv4 foi encontrada");
@@ -538,7 +567,7 @@ export default function App() {
     }
   }
 
-  function toggleNetworkInterface(ip: string, enabled: boolean) {
+  async function toggleNetworkInterface(ip: string, enabled: boolean) {
     const selected = new Set(links);
 
     if (enabled) {
@@ -551,6 +580,7 @@ export default function App() {
     setBindIps(next.join(", "));
     setRouteTests([]);
     window.localStorage.setItem("stordown.bindIps", next.join(","));
+    await syncRuntimePreferences(defaultDownloadDir, next, connections);
   }
 
   async function testRoutes() {
@@ -975,6 +1005,7 @@ export default function App() {
             "download.bin";
         setDefaultDownloadDir(picked);
         window.localStorage.setItem("stordown.downloadDir", picked);
+        await syncRuntimePreferences(picked, links, connections);
         setOutput(joinWindowsPath(picked, name));
         setOutputManuallyEdited(false);
         setStatus(`Pasta de destino: ${picked}`);
@@ -1288,6 +1319,12 @@ export default function App() {
             <span className="navIcon">☁</span> Google Drive
           </button>
           <button
+            className={`navItem ${view === "extension" ? "active" : ""}`}
+            onClick={() => setView("extension")}
+          >
+            <span className="navIcon">⊕</span> Extensão
+          </button>
+          <button
             className={`navItem ${view === "settings" ? "active" : ""}`}
             onClick={() => setView("settings")}
           >
@@ -1366,6 +1403,38 @@ export default function App() {
           <div className="statusPill">{status}</div>
         </header>
 
+        <div className="managerToolbar">
+          <button type="button" className={view === "download" ? "active" : ""} onClick={() => setView("download")}>
+            <span>＋</span> Download
+          </button>
+          <button type="button" className={view === "upload" ? "active" : ""} onClick={() => setView("upload")}>
+            <span>↑</span> Upload
+          </button>
+          <button type="button" className={view === "queue" ? "active" : ""} onClick={() => setView("queue")}>
+            <span>≡</span> Transferências
+          </button>
+          <button type="button" className={view === "extension" ? "active" : ""} onClick={() => setView("extension")}>
+            <span>⊕</span> Navegador
+          </button>
+          <div className="toolbarSummary">
+            <strong>{formatSpeed(aggregateLiveSpeed)}</strong>
+            <span>{records.filter((record) => record.status === "running").length} ativa(s)</span>
+          </div>
+        </div>
+
+        <ActiveTransferDock
+          records={queuedRecords}
+          liveStats={liveTransferStats}
+          selectedId={activeTransferId}
+          onSelect={(id) => {
+            setActiveTransferId(id);
+            setView("queue");
+          }}
+          onPause={pauseTransfer}
+          onResume={resumeTransfer}
+          onCancel={cancelTransfer}
+        />
+
         {view === "home" && (
           <section className="managerHome">
             <div className="quickActions">
@@ -1390,7 +1459,7 @@ export default function App() {
                   <small>Navegar, baixar e exportar</small>
                 </div>
               </button>
-              <button type="button" className="actionTile" onClick={() => setView("settings")}>
+              <button type="button" className="actionTile" onClick={() => setView("extension")}>
                 <span>⊕</span>
                 <div>
                   <strong>Extensão</strong>
@@ -1581,6 +1650,7 @@ export default function App() {
                     const value = Number(e.target.value);
                     setConnections(value);
                     window.localStorage.setItem("stordown.connections", String(value));
+                    void syncRuntimePreferences(defaultDownloadDir, links, value);
                   }}
                 />
                 <small className="fieldHint">
@@ -2129,8 +2199,8 @@ export default function App() {
           </>
         )}
 
-        {view === "settings" && (
-          <section className="settingsGrid">
+        {view === "extension" && (
+          <section className="extensionWorkspace">
             <section className="downloadCard browserInstaller">
               <div className="notice">
                 <strong>Extensão Chrome / Edge incluída</strong>
@@ -2201,6 +2271,29 @@ export default function App() {
                 </div>
               )}
             </section>
+
+            <section className="extensionHelp">
+              <div>
+                <strong>Integração do navegador</strong>
+                <span>
+                  Depois de conectar, o botão direito ganha “Baixar com StorDown” e a captura
+                  automática pode substituir o download do Chrome/Edge.
+                </span>
+              </div>
+              <div className="extensionFeatureGrid">
+                <span>✓ captura de links</span>
+                <span>✓ downloads autenticados por site</span>
+                <span>✓ cookies somente com sua autorização</span>
+                <span>✓ lote de links da página</span>
+                <span>✓ fila e progresso no desktop</span>
+                <span>✓ usa as mesmas interfaces escolhidas no StorDown</span>
+              </div>
+            </section>
+          </section>
+        )}
+
+        {view === "settings" && (
+          <section className="settingsGrid">
             <form className="downloadCard ruleEditor" onSubmit={saveRule}>
               <div className="notice">
                 <strong>Categorias automáticas de download</strong>
@@ -2336,23 +2429,26 @@ export default function App() {
           />
         )}
 
-        <section className="metrics">
-          <article>
-            <span>Fila</span>
-            <strong>{queuedRecords.length}</strong>
-            <small>download + upload unificados</small>
-          </article>
-          <article>
-            <span>Execução</span>
-            <strong>2 simultâneas</strong>
-            <small>com Multi-WAN e telemetria</small>
-          </article>
-          <article>
-            <span>Histórico</span>
-            <strong>{finishedRecords.length}</strong>
-            <small>persistente em SQLite</small>
-          </article>
-        </section>
+        {view === "home" && (
+          <section className="metrics">
+            <article>
+              <span>Fila</span>
+              <strong>{queuedRecords.length}</strong>
+              <small>download + upload unificados</small>
+            </article>
+            <article>
+              <span>Execução</span>
+              <strong>2 simultâneas</strong>
+              <small>com Multi-WAN e telemetria</small>
+            </article>
+            <article>
+              <span>Histórico</span>
+              <strong>{finishedRecords.length}</strong>
+              <small>persistente em SQLite</small>
+            </article>
+          </section>
+        )}
+
       </section>
     </main>
   );
@@ -2632,6 +2728,7 @@ function viewTitle(view: View) {
   if (view === "cloud") return "Google Drive";
   if (view === "queue") return "Fila de transferências";
   if (view === "scheduled") return "Agendador";
+  if (view === "extension") return "Extensão do navegador";
   if (view === "settings") return "Configurações";
   return "Histórico";
 }
@@ -2655,8 +2752,11 @@ function viewSubtitle(view: View) {
   if (view === "scheduled") {
     return "Programe downloads HTTP/HTTPS para começar automaticamente mais tarde.";
   }
+  if (view === "extension") {
+    return "Instale e conecte a extensão Chrome/Edge que acompanha o StorDown.";
+  }
   if (view === "settings") {
-    return "Categorias e regras automáticas para organizar downloads capturados pelo navegador.";
+    return "Preferências e categorias automáticas para organizar downloads.";
   }
   return "Transferências concluídas, canceladas e com falha ficam salvas entre reinicializações.";
 }
