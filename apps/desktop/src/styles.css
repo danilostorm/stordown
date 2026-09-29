@@ -1556,3 +1556,231 @@ input:focus, textarea:focus, select:focus {
   grid-column: 1 / -1;
   line-height: 1.4;
 }
+
+
+.managerToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -4px 0 14px;
+  padding: 8px;
+  border: 1px solid #26344e;
+  border-radius: 12px;
+  background: #0b1220;
+  position: sticky;
+  top: 0;
+  z-index: 12;
+  backdrop-filter: blur(12px);
+}
+
+.managerToolbar > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 11px;
+  background: transparent;
+  color: #aebbd3;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.managerToolbar > button:hover,
+.managerToolbar > button.active {
+  border-color: #3d4f72;
+  background: #172238;
+  color: #ffffff;
+}
+
+.managerToolbar > button span {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.toolbarSummary {
+  margin-left: auto;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 7px;
+}
+
+.toolbarSummary strong {
+  color: #ffffff;
+  font-size: 12px;
+}
+
+.toolbarSummary span {
+  color: #7889a8;
+  font-size: 10px;
+}
+
+.activeTransferDock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid #2c3b59;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #10192a 0%, #0d1422 100%);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .16);
+}
+
+.dockMain {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dockIcon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: #17264a;
+  color: #87a7ff;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.dockBody {
+  min-width: 0;
+}
+
+.dockTitle,
+.dockMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dockTitle strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #f7f9ff;
+  font-size: 12px;
+}
+
+.dockTitle span {
+  margin-left: auto;
+  color: #aab9d5;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.dockTrack {
+  height: 4px;
+  margin: 6px 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #1c273b;
+}
+
+.dockFill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5875ff, #55b4ff);
+  transition: width .2s linear;
+}
+
+.dockMeta {
+  color: #7789aa;
+  font-size: 9px;
+  flex-wrap: wrap;
+}
+
+.dockActions {
+  display: flex;
+  gap: 6px;
+}
+
+.dockActions button {
+  min-width: 34px;
+  height: 32px;
+  border: 1px solid #344563;
+  border-radius: 8px;
+  background: #151f31;
+  color: #e9eefc;
+  cursor: pointer;
+}
+
+.dockQueueCount {
+  color: #7f90af;
+  font-size: 9px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.extensionWorkspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.extensionHelp {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid #283751;
+  border-radius: 14px;
+  background: #0d1524;
+}
+
+.extensionHelp > div:first-child {
+  display: grid;
+  gap: 6px;
+}
+
+.extensionHelp strong {
+  color: #ffffff;
+  font-size: 13px;
+}
+
+.extensionHelp span {
+  color: #8ea0bf;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.extensionFeatureGrid {
+  display: grid;
+  gap: 8px;
+}
+
+.extensionFeatureGrid span {
+  padding: 9px 10px;
+  border: 1px solid #253550;
+  border-radius: 8px;
+  background: #111b2b;
+  color: #b6c4df;
+}
+
+@media (max-width: 1180px) {
+  .extensionWorkspace {
+    grid-template-columns: 1fr;
+  }
+
+  .managerToolbar {
+    overflow-x: auto;
+  }
+
+  .toolbarSummary {
+    white-space: nowrap;
+  }
+}
