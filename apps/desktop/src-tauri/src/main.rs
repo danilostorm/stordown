@@ -1582,21 +1582,25 @@ async fn handle_browser_capture(
 
     let download_dir = PathBuf::from(&runtime.download_dir);
 
-    let file_name = if request
+    let provided_name = request
         .filename
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
+        .map(|value| browser_capture_filename(&url, Some(value)));
+
+    let file_name = if provided_name
+        .as_deref()
+        .is_some_and(|value| !looks_like_generated_file_name(value))
     {
-        browser_capture_filename(&url, request.filename.as_deref())
+        provided_name.unwrap_or_else(|| "download.bin".to_string())
     } else {
         match probe(&url).await {
             Ok(metadata) => metadata
                 .suggested_name
                 .map(|name| sanitize_windows_file_name(&name))
+                .filter(|name| !looks_like_generated_file_name(name))
+                .or(provided_name)
                 .unwrap_or_else(|| browser_capture_filename(&url, None)),
-            Err(_) => browser_capture_filename(&url, None),
+            Err(_) => provided_name.unwrap_or_else(|| browser_capture_filename(&url, None)),
         }
     };
 
@@ -1718,6 +1722,27 @@ fn browser_capture_filename(url: &str, provided: Option<&str>) -> String {
         .unwrap_or_else(|| "download.bin".to_string());
 
     sanitize_windows_file_name(&candidate)
+}
+
+fn looks_like_generated_file_name(value: &str) -> bool {
+    let path = Path::new(value);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(value);
+    let compact: String = stem
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+
+    let hex_token = compact.len() >= 24 && compact.chars().all(|ch| ch.is_ascii_hexdigit());
+    let opaque_token = path.extension().is_none()
+        && compact.len() >= 28
+        && stem
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'));
+
+    hex_token || opaque_token
 }
 
 fn sanitize_windows_file_name(value: &str) -> String {
