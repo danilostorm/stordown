@@ -39,6 +39,7 @@ use uuid::Uuid;
 const GOOGLE_KEYRING_SERVICE: &str = "StorDown Google Drive";
 const GOOGLE_UPLOAD_KEYRING_SERVICE: &str = "StorDown Google Drive Upload Session";
 const DEFAULT_QUEUE_CONCURRENCY: usize = 2;
+const BUNDLED_EXTENSION_ID: &str = "oiiogiiplcdekpofikkajmmgkjcpgojj";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NetworkInterfaceInfo {
@@ -71,6 +72,7 @@ struct BrowserCaptureResponse {
 
 #[derive(Debug, Clone, Serialize)]
 struct BrowserIntegrationResult {
+    extension_id: String,
     manifest_path: String,
     native_host_path: String,
     chrome_registered: bool,
@@ -1924,6 +1926,7 @@ fn install_browser_integration(
     }
 
     Ok(BrowserIntegrationResult {
+        extension_id,
         manifest_path: manifest_path.to_string_lossy().to_string(),
         native_host_path: installed_host.to_string_lossy().to_string(),
         chrome_registered,
