@@ -201,7 +201,8 @@ fn probe_from_response(response: &reqwest::Response, partial: bool) -> ProbeResu
         .get(CONTENT_DISPOSITION)
         .and_then(|value| value.to_str().ok())
         .and_then(filename_from_content_disposition)
-        .or_else(|| filename_from_url(response.url()));
+        .or_else(|| filename_from_url(response.url()))
+        .or_else(|| fallback_name_for_content_type(content_type.as_deref()));
 
     ProbeResult {
         size,
@@ -238,7 +239,58 @@ fn filename_from_content_disposition(value: &str) -> Option<String> {
 
 fn filename_from_url(url: &url::Url) -> Option<String> {
     let raw = url.path_segments()?.filter(|value| !value.is_empty()).last()?;
-    clean_filename(&percent_decode_lossy(raw))
+    let decoded = percent_decode_lossy(raw);
+    let name = clean_filename(&decoded)?;
+
+    if looks_like_opaque_identifier(&name) {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn looks_like_opaque_identifier(value: &str) -> bool {
+    let stem = value.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(value);
+    let compact: String = stem.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
+    let separators = stem.chars().filter(|ch| matches!(ch, '-' | '_')).count();
+
+    let uuid_like = stem.len() >= 32
+        && compact.len() >= 28
+        && separators <= 6
+        && compact.chars().all(|ch| ch.is_ascii_hexdigit());
+
+    let token_like = !value.contains('.')
+        && compact.len() >= 24
+        && stem
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'));
+
+    uuid_like || token_like
+}
+
+fn fallback_name_for_content_type(content_type: Option<&str>) -> Option<String> {
+    let mime = content_type?
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    let name = match mime.as_str() {
+        "application/zip" => "download.zip",
+        "application/x-7z-compressed" => "download.7z",
+        "application/x-rar-compressed" | "application/vnd.rar" => "download.rar",
+        "application/pdf" => "documento.pdf",
+        "video/mp4" => "video.mp4",
+        "video/x-matroska" => "video.mkv",
+        "audio/mpeg" => "audio.mp3",
+        "image/jpeg" => "imagem.jpg",
+        "image/png" => "imagem.png",
+        "application/x-iso9660-image" => "imagem.iso",
+        _ => "download.bin",
+    };
+
+    Some(name.to_string())
 }
 
 fn clean_filename(value: &str) -> Option<String> {
@@ -1001,7 +1053,10 @@ async fn assemble_parts(part_dir: &Path, output: &Path, segments: usize) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{adaptive_segment_count, segment_bounds, total_from_content_range, PartManifest};
+    use super::{
+        adaptive_segment_count, looks_like_opaque_identifier, segment_bounds,
+        total_from_content_range, PartManifest,
+    };
 
     #[test]
     fn segment_bounds_cover_entire_file_without_overlap() {
@@ -1017,6 +1072,18 @@ mod tests {
         let gib = 1024u64 * 1024 * 1024;
         assert_eq!(adaptive_segment_count(gib, 8), 128);
         assert!(adaptive_segment_count(64 * 1024 * 1024, 8) >= 8);
+    }
+
+    #[test]
+    fn rejects_opaque_url_tokens_as_visible_file_names() {
+        assert!(looks_like_opaque_identifier(
+            "8daf0958-49b3-4002-9515-af3f5300439e"
+        ));
+        assert!(looks_like_opaque_identifier(
+            "c8d15c4a993b438e917a904aa82903e4"
+        ));
+        assert!(!looks_like_opaque_identifier("ubuntu-26.04.iso"));
+        assert!(!looks_like_opaque_identifier("filme.mkv"));
     }
 
     #[test]
