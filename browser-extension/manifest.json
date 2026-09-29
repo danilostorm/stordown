@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "StorDown",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Capture browser downloads and send them to StorDown.",
   "permissions": [
     "activeTab",
@@ -24,5 +24,6 @@
   "action": {
     "default_title": "StorDown",
     "default_popup": "popup.html"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtul31DHCLb+m3qZ6Ma88lPh/y7IMETA6wDyOqwebf8EDF5TXDV++YrDcR2c/DE18VYEp2+RZt9Q7oaUmnjWCxCpREVOKgLyzau40N3PP+k1uWqQ0xHF1F7hQ/JjmI+iOo2SEUpL89OW9j1saQrq1NPYEab75hzgSj/Fjv9UJRnZ4ob9d89bsvkEuewV3BCsq3zHR4Q4SCzQHXJGDzNMVZ6NXU8yzc7BwAsiFyXgqTd5asopRyeZQKEfYvazAit1jxagOZ0hZZSAsd20Z+7mVN8Rlekv3i2tIknuFCAKMW4736gMRwdv6C/R/urPKYTUzwknvEWIfIJ4j0mChgx4YmQIDAQAB"
 }
