@@ -88,6 +88,30 @@ struct BrowserExtensionPrepared {
     extension_dir: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimePreferences {
+    download_dir: String,
+    selected_ips: Vec<String>,
+    connections: usize,
+}
+
+#[derive(Clone)]
+struct RuntimePreferencesState {
+    inner: Arc<Mutex<RuntimePreferences>>,
+}
+
+impl RuntimePreferencesState {
+    fn new(download_dir: String, selected_ips: Vec<String>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RuntimePreferences {
+                download_dir,
+                selected_ips,
+                connections: 8,
+            })),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GoogleSession {
     client_id: String,
@@ -1392,7 +1416,7 @@ async fn cancel_transfer(
 
 fn start_browser_capture_server(
     app: AppHandle,
-    download_dir: PathBuf,
+    preferences: RuntimePreferencesState,
     queue_state: QueueState,
     control_state: TransferControlState,
     store: TransferStore,
@@ -1416,7 +1440,7 @@ fn start_browser_capture_server(
             };
 
             let app = app.clone();
-            let download_dir = download_dir.clone();
+            let preferences = preferences.clone();
             let queue_state = queue_state.clone();
             let control_state = control_state.clone();
             let store = store.clone();
@@ -1444,7 +1468,7 @@ fn start_browser_capture_server(
                             handle_browser_capture(
                                 request,
                                 app.clone(),
-                                download_dir,
+                                preferences,
                                 queue_state,
                                 control_state,
                                 store,
@@ -1479,7 +1503,7 @@ fn start_browser_capture_server(
 async fn handle_browser_capture(
     request: BrowserCaptureRequest,
     app: AppHandle,
-    download_dir: PathBuf,
+    preferences: RuntimePreferencesState,
     queue_state: QueueState,
     control_state: TransferControlState,
     store: TransferStore,
@@ -1520,35 +1544,41 @@ async fn handle_browser_capture(
         };
     }
 
-    let interfaces = match tokio::task::spawn_blocking(discover_windows_interfaces).await {
-        Ok(Ok(value)) => value,
-        Ok(Err(error)) => {
-            return BrowserCaptureResponse {
-                ok: false,
-                transfer_id: None,
-                status: None,
-                error: Some(error),
-            };
+    let runtime = preferences.inner.lock().await.clone();
+    let bind_ips = if runtime.selected_ips.is_empty() {
+        match tokio::task::spawn_blocking(discover_windows_interfaces).await {
+            Ok(Ok(value)) => value.into_iter().map(|item| item.ipv4).collect::<Vec<_>>(),
+            Ok(Err(error)) => {
+                return BrowserCaptureResponse {
+                    ok: false,
+                    transfer_id: None,
+                    status: None,
+                    error: Some(error),
+                };
+            }
+            Err(error) => {
+                return BrowserCaptureResponse {
+                    ok: false,
+                    transfer_id: None,
+                    status: None,
+                    error: Some(format!("Falha ao detectar interfaces: {error}")),
+                };
+            }
         }
-        Err(error) => {
-            return BrowserCaptureResponse {
-                ok: false,
-                transfer_id: None,
-                status: None,
-                error: Some(format!("Falha ao detectar interfaces: {error}")),
-            };
-        }
+    } else {
+        runtime.selected_ips.clone()
     };
 
-    let bind_ips: Vec<String> = interfaces.into_iter().map(|item| item.ipv4).collect();
     if bind_ips.is_empty() {
         return BrowserCaptureResponse {
             ok: false,
             transfer_id: None,
             status: None,
-            error: Some("Nenhuma interface de rede ativa foi detectada".to_string()),
+            error: Some("Nenhuma interface de rede ativa foi selecionada".to_string()),
         };
     }
+
+    let download_dir = PathBuf::from(&runtime.download_dir);
 
     let file_name = if request
         .filename
@@ -1603,7 +1633,7 @@ async fn handle_browser_capture(
     match enqueue_download_job(
         url,
         output.to_string_lossy().to_string(),
-        8,
+        runtime.connections,
         bind_ips,
         auth_headers,
         None,
@@ -1924,6 +1954,53 @@ fn prepare_browser_extension(app: AppHandle) -> Result<BrowserExtensionPrepared,
 }
 
 #[tauri::command]
+async fn get_runtime_preferences(
+    state: State<'_, RuntimePreferencesState>,
+) -> Result<RuntimePreferences, String> {
+    Ok(state.inner.lock().await.clone())
+}
+
+#[tauri::command]
+async fn update_runtime_preferences(
+    download_dir: String,
+    selected_ips: Vec<String>,
+    connections: usize,
+    state: State<'_, RuntimePreferencesState>,
+) -> Result<RuntimePreferences, String> {
+    let download_dir = download_dir.trim();
+    if download_dir.is_empty() {
+        return Err("A pasta padrão de downloads não pode ficar vazia".to_string());
+    }
+
+    let connections = connections.clamp(1, 64);
+    let mut validated_ips = Vec::new();
+    for raw in selected_ips {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        trimmed
+            .parse::<IpAddr>()
+            .map_err(|_| format!("IP de interface inválido: {trimmed}"))?;
+        if !validated_ips.iter().any(|value| value == trimmed) {
+            validated_ips.push(trimmed.to_string());
+        }
+    }
+
+    std::fs::create_dir_all(download_dir)
+        .map_err(|error| format!("Falha ao preparar pasta padrão de downloads: {error}"))?;
+
+    let next = RuntimePreferences {
+        download_dir: download_dir.to_string(),
+        selected_ips: validated_ips,
+        connections,
+    };
+
+    *state.inner.lock().await = next.clone();
+    Ok(next)
+}
+
+#[tauri::command]
 fn get_desktop_defaults(app: AppHandle) -> Result<DesktopDefaults, String> {
     let app_data = app
         .path()
@@ -2158,10 +2235,16 @@ fn main() {
                 .map_err(|error| Box::<dyn std::error::Error>::from(std::io::Error::other(error)))?;
             let queue_state = QueueState::default();
             let control_state = TransferControlState::default();
+            let initial_interfaces = discover_windows_interfaces().unwrap_or_default();
+            let preferences_state = RuntimePreferencesState::new(
+                download_dir.to_string_lossy().to_string(),
+                initial_interfaces.iter().map(|item| item.ipv4.clone()).collect(),
+            );
 
             app.manage(store.clone());
             app.manage(queue_state.clone());
             app.manage(control_state.clone());
+            app.manage(preferences_state.clone());
             app.manage(GoogleAuthState::default());
 
             let restore_app = app.handle().clone();
@@ -2197,7 +2280,7 @@ fn main() {
 
             start_browser_capture_server(
                 app.handle().clone(),
-                download_dir,
+                preferences_state,
                 queue_state,
                 control_state,
                 store,
@@ -2218,6 +2301,8 @@ fn main() {
             prepare_browser_extension,
             open_browser_extensions,
             get_desktop_defaults,
+            get_runtime_preferences,
+            update_runtime_preferences,
             inspect_download_url,
             list_download_rules,
             save_download_rule,
