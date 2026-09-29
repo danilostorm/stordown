@@ -1879,10 +1879,15 @@ fn register_native_host_key(key: &str, manifest_path: &Path) -> Result<(), Strin
 
 #[tauri::command]
 fn install_browser_integration(
-    extension_id: String,
+    extension_id: Option<String>,
     app: AppHandle,
 ) -> Result<BrowserIntegrationResult, String> {
-    let extension_id = validate_extension_id(&extension_id)?;
+    let extension_id = extension_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(BUNDLED_EXTENSION_ID);
+    let extension_id = validate_extension_id(extension_id)?;
     let source = native_host_source_path(&app)?;
 
     let local_app_data = env::var_os("LOCALAPPDATA")
