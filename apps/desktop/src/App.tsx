@@ -1407,7 +1407,7 @@ export default function App() {
       <section className="content">
         <header>
           <div>
-            <p className="eyebrow">STORDOWN 0.1 ALPHA</p>
+            <p className="eyebrow">STORDOWN 0.1 ALPHA.3</p>
             <h1>{viewTitle(view)}</h1>
             <p className="subtitle">{viewSubtitle(view)}</p>
           </div>
@@ -1583,26 +1583,39 @@ export default function App() {
               )}
             </label>
 
-            <label>
-              Arquivo de destino
-              <div className="fieldWithButton">
+            <div className="downloadDestinationGrid">
+              <label>
+                Pasta de destino
+                <div className="fieldWithButton">
+                  <input
+                    value={parentDirectory(output) || defaultDownloadDir}
+                    readOnly
+                    placeholder="Pasta Downloads deste Windows"
+                  />
+                  <button type="button" onClick={chooseDownloadDestination}>
+                    Escolher…
+                  </button>
+                </div>
+                <small className="fieldHint">A pasta fica salva apenas neste computador.</small>
+              </label>
+
+              <label>
+                Nome do arquivo
                 <input
-                  value={output}
-                  onChange={(e) => {
-                    setOutput(e.target.value);
+                  value={fileNameFromPath(output)}
+                  onChange={(event) => {
+                    const directory = parentDirectory(output) || defaultDownloadDir;
+                    setOutput(joinWindowsPath(directory, event.target.value));
                     setOutputManuallyEdited(true);
                   }}
-                  placeholder="Pasta Downloads deste Windows"
+                  placeholder="arquivo.iso"
                   required
                 />
-                <button type="button" onClick={chooseDownloadDestination}>
-                  Escolher pasta…
-                </button>
-              </div>
-              <small className="fieldHint">
-                O StorDown usa a pasta Downloads deste computador e tenta obter o nome real pelo servidor.
-              </small>
-            </label>
+                <small className="fieldHint">
+                  O nome vem do servidor quando disponível. Você pode editar antes de iniciar.
+                </small>
+              </label>
+            </div>
 
             <label>
               Agendar início — opcional
@@ -2300,6 +2313,30 @@ export default function App() {
 
         {view === "settings" && (
           <section className="settingsGrid">
+            <section className="downloadCard portableSettings">
+              <div className="notice">
+                <strong>Configuração deste computador</strong>
+                <span>
+                  Nada aqui depende do seu PC de desenvolvimento ou da sua rede. Cada instalação
+                  detecta as próprias interfaces e usa a pasta Downloads do usuário por padrão.
+                </span>
+              </div>
+
+              <label>
+                Pasta padrão de downloads
+                <div className="fieldWithButton">
+                  <input value={defaultDownloadDir} readOnly />
+                  <button type="button" onClick={chooseDownloadDestination}>Alterar…</button>
+                </div>
+              </label>
+
+              <div className="portableSummary">
+                <span><strong>{detectedNics.length}</strong> interface(s) física(s) detectada(s)</span>
+                <span><strong>{links.length}</strong> selecionada(s) para transferências</span>
+                <span><strong>{connections}</strong> conexão(ões) por arquivo</span>
+              </div>
+            </section>
+
             <form className="downloadCard ruleEditor" onSubmit={saveRule}>
               <div className="notice">
                 <strong>Categorias automáticas de download</strong>
