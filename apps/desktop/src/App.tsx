@@ -107,6 +107,7 @@ type DownloadRule = {
 };
 
 type BrowserIntegrationResult = {
+  extension_id: string;
   manifest_path: string;
   native_host_path: string;
   chrome_registered: boolean;
@@ -212,7 +213,7 @@ export default function App() {
   const [ruleDestination, setRuleDestination] = useState("");
   const [ruleEnabled, setRuleEnabled] = useState(true);
   const [rulePriority, setRulePriority] = useState(100);
-  const [browserExtensionId, setBrowserExtensionId] = useState("");
+  const [browserExtensionId, setBrowserExtensionId] = useState("oiiogiiplcdekpofikkajmmgkjcpgojj");
   const [browserInstallBusy, setBrowserInstallBusy] = useState(false);
   const [browserIntegration, setBrowserIntegration] = useState<BrowserIntegrationResult | null>(null);
   const [browserExtensionPrepared, setBrowserExtensionPrepared] = useState<BrowserExtensionPrepared | null>(null);
@@ -1160,12 +1161,21 @@ export default function App() {
 
   async function prepareBrowserExtension() {
     setBrowserInstallBusy(true);
-    setStatus("Preparando extensão Chrome/Edge incluída no StorDown…");
+    setStatus("Preparando extensão e Native Host do StorDown…");
 
     try {
-      const result = await invoke<BrowserExtensionPrepared>("prepare_browser_extension");
-      setBrowserExtensionPrepared(result);
-      setStatus("Extensão extraída. Ative o modo desenvolvedor e use 'Carregar sem compactação'.");
+      const prepared = await invoke<BrowserExtensionPrepared>("prepare_browser_extension");
+      setBrowserExtensionPrepared(prepared);
+
+      const integration = await invoke<BrowserIntegrationResult>("install_browser_integration", {
+        extensionId: null,
+      });
+      setBrowserIntegration(integration);
+      setBrowserExtensionId(integration.extension_id);
+
+      setStatus(
+        "Extensão preparada e Native Host registrado. Agora carregue a pasta no Chrome/Edge uma única vez.",
+      );
     } catch (error) {
       setStatus(`Erro ao preparar extensão: ${String(error)}`);
     } finally {
@@ -1175,14 +1185,15 @@ export default function App() {
 
   async function installBrowserIntegration() {
     setBrowserInstallBusy(true);
-    setStatus("Instalando integração Chrome/Edge…");
+    setStatus("Registrando novamente a integração Chrome/Edge…");
 
     try {
       const result = await invoke<BrowserIntegrationResult>("install_browser_integration", {
-        extensionId: browserExtensionId,
+        extensionId: browserExtensionId || null,
       });
       setBrowserIntegration(result);
-      setStatus("Integração do navegador instalada");
+      setBrowserExtensionId(result.extension_id);
+      setStatus("Integração do navegador registrada neste Windows");
     } catch (error) {
       setStatus(`Erro ao instalar integração: ${String(error)}`);
     } finally {
@@ -2211,10 +2222,9 @@ export default function App() {
               </div>
 
               <div className="extensionSteps">
-                <span><b>1</b> Clique em <strong>Preparar extensão</strong>. A pasta será extraída e aberta.</span>
-                <span><b>2</b> Abra Chrome/Edge, ative o modo desenvolvedor e escolha <strong>Carregar sem compactação</strong>.</span>
-                <span><b>3</b> Selecione a pasta extraída, copie o ID de 32 caracteres e cole abaixo.</span>
-                <span><b>4</b> Clique em <strong>Conectar ao StorDown</strong>.</span>
+                <span><b>1</b> Clique em <strong>Preparar e conectar</strong>. O StorDown extrai a extensão e registra o Native Host automaticamente.</span>
+                <span><b>2</b> No Chrome/Edge, ative o modo desenvolvedor, escolha <strong>Carregar sem compactação</strong> e selecione a pasta aberta pelo StorDown.</span>
+                <span><b>3</b> Pronto. O ID da extensão é fixo e igual em qualquer computador; não precisa copiar nem configurar manualmente.</span>
               </div>
 
               <div className="browserInstallerActions">
@@ -2224,7 +2234,7 @@ export default function App() {
                   onClick={prepareBrowserExtension}
                   disabled={browserInstallBusy}
                 >
-                  {browserInstallBusy ? "Preparando…" : "Preparar extensão"}
+                  {browserInstallBusy ? "Preparando…" : "Preparar e conectar"}
                 </button>
                 <button type="button" onClick={() => openExtensionsPage("chrome")}>
                   Chrome
@@ -2241,30 +2251,26 @@ export default function App() {
                 </div>
               )}
 
-              <label>
-                ID da extensão
-                <input
-                  value={browserExtensionId}
-                  onChange={(event) => setBrowserExtensionId(event.target.value.trim().toLowerCase())}
-                  placeholder="Cole o ID exibido pelo Chrome ou Edge"
-                  maxLength={32}
-                />
-              </label>
+              <div className="browserInstallResult extensionIdentity">
+                <strong>ID fixo da extensão</strong>
+                <code>{browserExtensionId}</code>
+                <span>Esse mesmo ID é usado no Chrome e Edge em qualquer PC.</span>
+              </div>
 
               <div className="browserInstallerActions">
                 <button
                   type="button"
-                  className="primary"
                   onClick={installBrowserIntegration}
-                  disabled={browserInstallBusy || browserExtensionId.length !== 32}
+                  disabled={browserInstallBusy}
                 >
-                  {browserInstallBusy ? "Conectando…" : "Conectar ao StorDown"}
+                  Registrar novamente
                 </button>
               </div>
 
               {browserIntegration && (
                 <div className="browserInstallResult">
                   <strong>Extensão conectada ao aplicativo</strong>
+                  <span>ID: {browserIntegration.extension_id}</span>
                   <span>Chrome: {browserIntegration.chrome_registered ? "registrado" : "não registrado"}</span>
                   <span>Edge: {browserIntegration.edge_registered ? "registrado" : "não registrado"}</span>
                   <code>{browserIntegration.native_host_path}</code>
