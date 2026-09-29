@@ -1,6 +1,6 @@
 [package]
 name = "stordown-desktop"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 description = "StorDown multi-WAN download and upload manager"
 edition = "2021"
 
