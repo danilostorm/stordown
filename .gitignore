@@ -1,9 +1,0 @@
-target/
-node_modules/
-dist/
-*.log
-*.tmp
-.DS_Store
-.vscode/
-.idea/
-*.stordown.parts/
